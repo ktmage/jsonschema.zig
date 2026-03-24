@@ -66,7 +66,7 @@ fn handleStart(obj: std.json.ObjectMap) !void {
     }
 
     const response =
-        \\{"version":1,"implementation":{"language":"zig","name":"jsonschema.zig","version":"0.1.0","homepage":"https://github.com/ktmage/jsonschema.zig","issues":"https://github.com/ktmage/jsonschema.zig/issues","source":"https://github.com/ktmage/jsonschema.zig","dialects":["http://json-schema.org/draft-07/schema#"]}}
+        \\{"version":1,"implementation":{"language":"zig","name":"jsonschema.zig","version":"0.2.0","homepage":"https://github.com/ktmage/jsonschema.zig","issues":"https://github.com/ktmage/jsonschema.zig/issues","source":"https://github.com/ktmage/jsonschema.zig","dialects":["https://json-schema.org/draft/2020-12/schema","http://json-schema.org/draft-07/schema#"]}}
     ;
     try stdout.print("{s}\n", .{response});
 }
@@ -80,7 +80,9 @@ fn handleDialect(obj: std.json.ObjectMap) !void {
         };
     };
 
-    if (std.mem.eql(u8, dialect, "http://json-schema.org/draft-07/schema#")) {
+    if (std.mem.eql(u8, dialect, "http://json-schema.org/draft-07/schema#") or
+        std.mem.eql(u8, dialect, "https://json-schema.org/draft/2020-12/schema"))
+    {
         try stdout.print("{{\"ok\":true}}\n", .{});
     } else {
         try stdout.print("{{\"ok\":false}}\n", .{});

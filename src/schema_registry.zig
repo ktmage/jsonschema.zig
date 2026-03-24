@@ -63,6 +63,81 @@ const draft07_metaschema_json =
     \\}
 ;
 
+/// Minimal Draft 2020-12 metaschema.
+/// This is a simplified version that validates the basic structure.
+const draft2020_metaschema_json =
+    \\{
+    \\  "$schema": "https://json-schema.org/draft/2020-12/schema",
+    \\  "$id": "https://json-schema.org/draft/2020-12/schema",
+    \\  "$defs": {
+    \\    "nonNegativeInteger": { "type": "integer", "minimum": 0 },
+    \\    "nonNegativeIntegerDefault0": { "type": "integer", "minimum": 0 },
+    \\    "simpleTypes": { "enum": ["array","boolean","integer","null","number","object","string"] },
+    \\    "stringArray": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+    \\  },
+    \\  "type": ["object", "boolean"],
+    \\  "properties": {
+    \\    "$id": { "type": "string" },
+    \\    "$schema": { "type": "string" },
+    \\    "$ref": { "type": "string" },
+    \\    "$anchor": { "type": "string" },
+    \\    "$dynamicRef": { "type": "string" },
+    \\    "$dynamicAnchor": { "type": "string" },
+    \\    "$defs": { "type": "object", "additionalProperties": { "$ref": "#" } },
+    \\    "$comment": { "type": "string" },
+    \\    "title": { "type": "string" },
+    \\    "description": { "type": "string" },
+    \\    "default": true,
+    \\    "deprecated": { "type": "boolean" },
+    \\    "readOnly": { "type": "boolean" },
+    \\    "writeOnly": { "type": "boolean" },
+    \\    "examples": { "type": "array" },
+    \\    "multipleOf": { "type": "number", "exclusiveMinimum": 0 },
+    \\    "maximum": { "type": "number" },
+    \\    "exclusiveMaximum": { "type": "number" },
+    \\    "minimum": { "type": "number" },
+    \\    "exclusiveMinimum": { "type": "number" },
+    \\    "maxLength": { "$ref": "#/$defs/nonNegativeInteger" },
+    \\    "minLength": { "$ref": "#/$defs/nonNegativeIntegerDefault0" },
+    \\    "pattern": { "type": "string" },
+    \\    "prefixItems": { "type": "array", "items": { "$ref": "#" }, "minItems": 1 },
+    \\    "items": { "$ref": "#" },
+    \\    "contains": { "$ref": "#" },
+    \\    "maxItems": { "$ref": "#/$defs/nonNegativeInteger" },
+    \\    "minItems": { "$ref": "#/$defs/nonNegativeIntegerDefault0" },
+    \\    "uniqueItems": { "type": "boolean" },
+    \\    "maxContains": { "$ref": "#/$defs/nonNegativeInteger" },
+    \\    "minContains": { "$ref": "#/$defs/nonNegativeInteger" },
+    \\    "maxProperties": { "$ref": "#/$defs/nonNegativeInteger" },
+    \\    "minProperties": { "$ref": "#/$defs/nonNegativeIntegerDefault0" },
+    \\    "required": { "$ref": "#/$defs/stringArray" },
+    \\    "additionalProperties": { "$ref": "#" },
+    \\    "properties": { "type": "object", "additionalProperties": { "$ref": "#" } },
+    \\    "patternProperties": { "type": "object", "additionalProperties": { "$ref": "#" } },
+    \\    "dependentRequired": { "type": "object", "additionalProperties": { "$ref": "#/$defs/stringArray" } },
+    \\    "dependentSchemas": { "type": "object", "additionalProperties": { "$ref": "#" } },
+    \\    "propertyNames": { "$ref": "#" },
+    \\    "const": true,
+    \\    "enum": { "type": "array", "minItems": 1, "uniqueItems": true },
+    \\    "type": { "anyOf": [{ "$ref": "#/$defs/simpleTypes" }, { "type": "array", "items": { "$ref": "#/$defs/simpleTypes" }, "minItems": 1, "uniqueItems": true }] },
+    \\    "if": { "$ref": "#" },
+    \\    "then": { "$ref": "#" },
+    \\    "else": { "$ref": "#" },
+    \\    "allOf": { "type": "array", "items": { "$ref": "#" }, "minItems": 1 },
+    \\    "anyOf": { "type": "array", "items": { "$ref": "#" }, "minItems": 1 },
+    \\    "oneOf": { "type": "array", "items": { "$ref": "#" }, "minItems": 1 },
+    \\    "not": { "$ref": "#" },
+    \\    "unevaluatedItems": { "$ref": "#" },
+    \\    "unevaluatedProperties": { "$ref": "#" },
+    \\    "format": { "type": "string" },
+    \\    "contentMediaType": { "type": "string" },
+    \\    "contentEncoding": { "type": "string" },
+    \\    "contentSchema": { "$ref": "#" }
+    \\  },
+    \\  "additionalProperties": true
+    \\}
+;
+
 pub const SchemaRegistry = struct {
     allocator: Allocator,
     /// URI (without fragment) -> schema
@@ -71,6 +146,7 @@ pub const SchemaRegistry = struct {
     anchors: std.StringHashMap(std.json.Value),
     /// Parsed metaschema (kept alive for the lifetime of the registry)
     metaschema_parsed: ?std.json.Parsed(std.json.Value) = null,
+    metaschema_2020_parsed: ?std.json.Parsed(std.json.Value) = null,
 
     pub fn init(allocator: Allocator) SchemaRegistry {
         return .{
@@ -82,30 +158,48 @@ pub const SchemaRegistry = struct {
 
     pub fn deinit(self: *SchemaRegistry) void {
         if (self.metaschema_parsed) |p| p.deinit();
+        if (self.metaschema_2020_parsed) |p| p.deinit();
         self.schemas.deinit();
         self.anchors.deinit();
     }
 
     /// Ensure the draft-07 metaschema is registered.
     fn ensureMetaschema(self: *SchemaRegistry) void {
-        const uri = "http://json-schema.org/draft-07/schema";
-        if (self.schemas.get(uri) != null) return;
-        if (self.metaschema_parsed != null) return;
-
-        self.metaschema_parsed = std.json.parseFromSlice(
-            std.json.Value,
-            self.allocator,
-            draft07_metaschema_json,
-            .{},
-        ) catch return;
-
-        if (self.metaschema_parsed) |parsed| {
-            self.schemas.put(
-                self.allocator.dupe(u8, uri) catch return,
-                parsed.value,
+        const uri07 = "http://json-schema.org/draft-07/schema";
+        if (self.schemas.get(uri07) == null and self.metaschema_parsed == null) {
+            self.metaschema_parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                draft07_metaschema_json,
+                .{},
             ) catch return;
-            // Also scan for $ids inside the metaschema
-            self.scanIds(uri, parsed.value);
+
+            if (self.metaschema_parsed) |parsed| {
+                self.schemas.put(
+                    self.allocator.dupe(u8, uri07) catch return,
+                    parsed.value,
+                ) catch return;
+                self.scanIds(uri07, parsed.value);
+            }
+        }
+
+        // Also register 2020-12 metaschema (permissive — accepts everything)
+        const uri2020 = "https://json-schema.org/draft/2020-12/schema";
+        if (self.schemas.get(uri2020) == null and self.metaschema_2020_parsed == null) {
+            self.metaschema_2020_parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                draft2020_metaschema_json,
+                .{},
+            ) catch return;
+
+            if (self.metaschema_2020_parsed) |parsed| {
+                self.schemas.put(
+                    self.allocator.dupe(u8, uri2020) catch return,
+                    parsed.value,
+                ) catch return;
+                self.scanIds(uri2020, parsed.value);
+            }
         }
     }
 
@@ -143,6 +237,23 @@ pub const SchemaRegistry = struct {
                     self.schemas.put(key, schema) catch return;
                     current_base = no_fragment;
                 }
+            }
+        }
+
+        // Support $anchor keyword (Draft 2020-12)
+        if (obj.get("$anchor")) |anchor_val| {
+            if (asString(anchor_val)) |anchor_str| {
+                // Register as base_uri#anchor_name
+                const anchor_uri = std.fmt.allocPrint(self.allocator, "{s}#{s}", .{ current_base, anchor_str }) catch return;
+                self.anchors.put(anchor_uri, schema) catch return;
+            }
+        }
+
+        // Support $dynamicAnchor keyword (Draft 2020-12) — also acts as a regular anchor
+        if (obj.get("$dynamicAnchor")) |anchor_val| {
+            if (asString(anchor_val)) |anchor_str| {
+                const anchor_uri = std.fmt.allocPrint(self.allocator, "{s}#{s}", .{ current_base, anchor_str }) catch return;
+                self.anchors.put(anchor_uri, schema) catch return;
             }
         }
 
@@ -283,10 +394,66 @@ pub fn resolveUri(allocator: Allocator, base: []const u8, ref: []const u8) []con
 
     // Relative path — resolve against base directory
     const base_no_frag = stripFragment(base);
+    // Strip leading "./" from ref
+    const clean_ref = if (ref.len >= 2 and ref[0] == '.' and ref[1] == '/') ref[2..] else ref;
     if (std.mem.lastIndexOfScalar(u8, base_no_frag, '/')) |last_slash| {
-        return std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_no_frag[0..last_slash], ref }) catch ref;
+        const resolved_raw = std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_no_frag[0..last_slash], clean_ref }) catch ref;
+        return normalizeUri(allocator, resolved_raw);
     }
-    return allocator.dupe(u8, ref) catch ref;
+    return allocator.dupe(u8, clean_ref) catch clean_ref;
+}
+
+/// Normalize a URI by resolving ".." and "." segments.
+fn normalizeUri(allocator: Allocator, uri: []const u8) []const u8 {
+    // Only normalize if there are "./" or "../" patterns
+    if (std.mem.indexOf(u8, uri, "./") == null and std.mem.indexOf(u8, uri, "..") == null) return uri;
+
+    // Find where the path starts (after scheme://authority)
+    const scheme_end = std.mem.indexOf(u8, uri, "://") orelse return uri;
+    const path_start = std.mem.indexOfScalarPos(u8, uri, scheme_end + 3, '/') orelse return uri;
+
+    const prefix = uri[0..path_start];
+    const path = uri[path_start..];
+    const has_trailing_slash = path.len > 0 and path[path.len - 1] == '/';
+
+    // Split path into segments and resolve . and ..
+    var segments = std.ArrayList([]const u8).init(allocator);
+    defer segments.deinit();
+
+    var remaining = path;
+    while (remaining.len > 0) {
+        if (remaining[0] == '/') remaining = remaining[1..];
+        if (remaining.len == 0) break;
+        const sep = std.mem.indexOfScalar(u8, remaining, '/');
+        const seg = if (sep) |s| remaining[0..s] else remaining;
+        remaining = if (sep) |s| remaining[s..] else "";
+
+        if (std.mem.eql(u8, seg, ".")) {
+            continue;
+        } else if (std.mem.eql(u8, seg, "..")) {
+            if (segments.items.len > 0) _ = segments.pop();
+        } else {
+            segments.append(seg) catch return uri;
+        }
+    }
+
+    // Reconstruct
+    var result = std.ArrayList(u8).init(allocator);
+    result.appendSlice(prefix) catch return uri;
+    for (segments.items) |seg| {
+        result.append('/') catch return uri;
+        result.appendSlice(seg) catch return uri;
+    }
+    if (result.items.len == prefix.len) {
+        result.append('/') catch return uri;
+    }
+    // Preserve trailing slash
+    if (has_trailing_slash) {
+        if (result.items.len > 0 and result.items[result.items.len - 1] != '/') {
+            result.append('/') catch return uri;
+        }
+    }
+    return result.toOwnedSlice() catch uri;
 }
 
 fn hasScheme(uri: []const u8) bool {
@@ -371,6 +538,7 @@ pub fn resolvePointerWithBaseUri(allocator: Allocator, value: std.json.Value, po
     var remaining = pointer;
     var has_more = true;
     var current_base = initial_base;
+    var is_first = true;
 
     while (has_more) {
         const sep = std.mem.indexOfScalar(u8, remaining, '/');
@@ -386,18 +554,24 @@ pub fn resolvePointerWithBaseUri(allocator: Allocator, value: std.json.Value, po
 
         switch (current) {
             .object => |obj| {
-                // Track $id changes on intermediate schemas
-                if (obj.get("$id")) |id_val| {
-                    if (asString(id_val)) |id_str| {
-                        if (id_str.len > 0 and id_str[0] != '#') {
-                            const resolved_id = resolveUri(allocator, current_base, id_str);
-                            current_base = stripFragment(resolved_id);
+                // Track $id changes on intermediate schemas.
+                // Skip the first node if it's the root of a looked-up schema
+                // (its $id is already accounted for by the URI lookup).
+                if (!is_first) {
+                    if (obj.get("$id")) |id_val| {
+                        if (asString(id_val)) |id_str| {
+                            if (id_str.len > 0 and id_str[0] != '#') {
+                                const resolved_id = resolveUri(allocator, current_base, id_str);
+                                current_base = stripFragment(resolved_id);
+                            }
                         }
                     }
                 }
+                is_first = false;
                 current = obj.get(token) orelse return .{ .schema = null, .base_uri = current_base };
             },
             .array => |arr| {
+                is_first = false;
                 const index = std.fmt.parseInt(usize, token, 10) catch return .{ .schema = null, .base_uri = current_base };
                 if (index >= arr.items.len) return .{ .schema = null, .base_uri = current_base };
                 current = arr.items[index];
@@ -426,6 +600,20 @@ fn findAnchorInSchema(schema: std.json.Value, anchor_name: []const u8, base_uri:
             if (id_str.len > 0 and id_str[0] == '#') {
                 if (std.mem.eql(u8, id_str[1..], anchor_name)) return schema;
             }
+        }
+    }
+
+    // Check $anchor keyword (Draft 2020-12)
+    if (obj.get("$anchor")) |anchor_val| {
+        if (asString(anchor_val)) |anchor_str| {
+            if (std.mem.eql(u8, anchor_str, anchor_name)) return schema;
+        }
+    }
+
+    // Check $dynamicAnchor keyword (Draft 2020-12) — also acts as a regular anchor
+    if (obj.get("$dynamicAnchor")) |anchor_val| {
+        if (asString(anchor_val)) |anchor_str| {
+            if (std.mem.eql(u8, anchor_str, anchor_name)) return schema;
         }
     }
 

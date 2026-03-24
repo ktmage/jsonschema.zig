@@ -86,6 +86,18 @@ fn getSchemaId(schema: std.json.Value) ?[]const u8 {
     };
 }
 
+fn getSchemaDialectUri(schema: std.json.Value) ?[]const u8 {
+    const obj = switch (schema) {
+        .object => |o| o,
+        else => return null,
+    };
+    const val = obj.get("$schema") orelse return null;
+    return switch (val) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
 /// Load remote schemas from the test suite's remotes/ directory.
 fn loadRemotes(
     allocator: std.mem.Allocator,
@@ -165,6 +177,75 @@ test "JSON Schema Test Suite — Draft 7" {
 
     std.debug.print(
         "\n=== Draft 7 Test Suite Results ===\n" ++
+            "Files:  {d}\n" ++
+            "Tests:  {d}\n" ++
+            "Passed: {d}\n" ++
+            "Failed: {d}\n" ++
+            "Rate:   {d:.1}%\n\n",
+        .{
+            file_count,
+            total_tests,
+            total_passed,
+            total_failed,
+            if (total_tests > 0) @as(f64, @floatFromInt(total_passed)) / @as(f64, @floatFromInt(total_tests)) * 100.0 else 0.0,
+        },
+    );
+
+    try std.testing.expect(file_count > 0);
+}
+
+test "JSON Schema Test Suite — Draft 2020-12" {
+    const allocator = std.testing.allocator;
+    const path = build_options.test_suite_path_2020;
+    const remotes_path = build_options.remotes_path;
+
+    // Load remote schemas
+    var remotes_arena = std.heap.ArenaAllocator.init(allocator);
+    defer remotes_arena.deinit();
+    const remotes_alloc = remotes_arena.allocator();
+
+    var remotes_registry = SchemaRegistry.init(remotes_alloc);
+    var parsed_remotes = std.ArrayList(std.json.Parsed(std.json.Value)).init(remotes_alloc);
+
+    var remotes_dir = try std.fs.openDirAbsolute(remotes_path, .{ .iterate = true });
+    defer remotes_dir.close();
+    loadRemotes(remotes_alloc, &remotes_registry, remotes_dir, "", &parsed_remotes);
+
+    // Run test files
+    var dir = try std.fs.openDirAbsolute(path, .{ .iterate = true });
+    defer dir.close();
+
+    var total_passed: usize = 0;
+    var total_failed: usize = 0;
+    var total_tests: usize = 0;
+    var file_count: usize = 0;
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+
+        // Skip format.json — we don't validate format by default
+        if (std.mem.eql(u8, entry.name, "format.json")) continue;
+
+        const contents = dir.readFileAlloc(allocator, entry.name, 10 * 1024 * 1024) catch |err| {
+            std.debug.print("Failed to read {s}: {}\n", .{ entry.name, err });
+            continue;
+        };
+        defer allocator.free(contents);
+
+        const counts = runTestFile(allocator, entry.name, contents, &remotes_registry) catch |err| {
+            std.debug.print("Failed to parse {s}: {}\n", .{ entry.name, err });
+            continue;
+        };
+
+        total_passed += counts.passed;
+        total_failed += counts.failed;
+        total_tests += counts.total;
+        file_count += 1;
+    }
+
+    std.debug.print(
+        "\n=== Draft 2020-12 Test Suite Results ===\n" ++
             "Files:  {d}\n" ++
             "Tests:  {d}\n" ++
             "Passed: {d}\n" ++

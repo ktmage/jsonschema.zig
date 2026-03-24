@@ -23,6 +23,10 @@ pub fn validate(ctx: Context) void {
     // Try registry-based resolution with root tracking
     if (ctx.registry) |reg| {
         if (reg.resolveWithRoot(ctx.root_schema, effective_base, ref_str)) |res| {
+            // For 2020-12 dynamic scope: if resolved target is in a different resource,
+            // push that resource's root to the dynamic scope
+            const pushed_scope = pushResourceScope(ctx, res.root, res.base_uri);
+
             const result = jsonschema.validateFull(
                 ctx.allocator,
                 res.root,
@@ -32,8 +36,11 @@ pub fn validate(ctx: Context) void {
                 schema_path,
                 ctx.registry,
                 res.base_uri,
+                ctx.dynamic_scope,
             );
             defer result.deinit();
+
+            if (pushed_scope) popResourceScope(ctx);
 
             if (!result.isValid()) {
                 for (result.errors) |err| {
@@ -73,6 +80,7 @@ pub fn validate(ctx: Context) void {
         schema_path,
         ctx.registry,
         effective_base,
+        ctx.dynamic_scope,
     );
     defer result.deinit();
 
@@ -86,4 +94,23 @@ pub fn validate(ctx: Context) void {
             }) catch return;
         }
     }
+}
+
+/// Push a schema resource to the dynamic scope if it's not already there.
+/// Returns true if pushed (caller must pop).
+fn pushResourceScope(ctx: Context, root: std.json.Value, base_uri: []const u8) bool {
+    const ds = ctx.dynamic_scope orelse return false;
+
+    // Check if this resource is already in the scope (avoid duplicates)
+    for (ds.items) |entry| {
+        if (std.mem.eql(u8, entry.base_uri, base_uri)) return false;
+    }
+
+    ds.append(.{ .base_uri = base_uri, .schema = root }) catch return false;
+    return true;
+}
+
+fn popResourceScope(ctx: Context) void {
+    const ds = ctx.dynamic_scope orelse return;
+    if (ds.items.len > 0) _ = ds.pop();
 }

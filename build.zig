@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("json_schema_test_suite", .{})) |test_suite_dep| {
         const options = b.addOptions();
         options.addOptionPath("test_suite_path", test_suite_dep.path("tests/draft7"));
+        options.addOptionPath("test_suite_path_2020", test_suite_dep.path("tests/draft2020-12"));
         options.addOptionPath("remotes_path", test_suite_dep.path("remotes"));
         lib_test.root_module.addOptions("build_options", options);
     }

@@ -4,6 +4,12 @@ const jsonschema = @import("main.zig");
 const ValidationError = jsonschema.ValidationError;
 const JsonPointer = jsonschema.JsonPointer;
 
+/// Dynamic scope entry: tracks which schema resource is being evaluated
+pub const DynamicScopeEntry = struct {
+    base_uri: []const u8,
+    schema: std.json.Value,
+};
+
 /// Context passed to every keyword validator.
 pub const Context = struct {
     allocator: Allocator,
@@ -18,6 +24,8 @@ pub const Context = struct {
     /// Base URI before this schema's own $id is applied.
     /// Used by $ref to avoid sibling $id changing its resolution scope.
     ref_base_uri: []const u8 = "",
+    /// Dynamic scope stack for $dynamicRef resolution
+    dynamic_scope: ?*std.ArrayList(DynamicScopeEntry) = null,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -36,6 +44,7 @@ pub const Context = struct {
             schema_path,
             self.registry,
             self.base_uri,
+            self.dynamic_scope,
         );
     }
 
@@ -74,6 +83,7 @@ const keyword_table = .{
     .{ "maxLength", @import("keywords/max_length.zig").validate },
     .{ "pattern", @import("keywords/pattern.zig").validate },
     // Array
+    .{ "prefixItems", @import("keywords/prefix_items.zig").validate },
     .{ "items", @import("keywords/items.zig").validate },
     .{ "additionalItems", @import("keywords/additional_items.zig").validate },
     .{ "minItems", @import("keywords/min_items.zig").validate },
@@ -89,6 +99,8 @@ const keyword_table = .{
     .{ "maxProperties", @import("keywords/max_properties.zig").validate },
     .{ "propertyNames", @import("keywords/property_names.zig").validate },
     .{ "dependencies", @import("keywords/dependencies.zig").validate },
+    .{ "dependentRequired", @import("keywords/dependent_required.zig").validate },
+    .{ "dependentSchemas", @import("keywords/dependent_schemas.zig").validate },
     // Logical composition
     .{ "allOf", @import("keywords/all_of.zig").validate },
     .{ "anyOf", @import("keywords/any_of.zig").validate },
@@ -96,25 +108,106 @@ const keyword_table = .{
     .{ "not", @import("keywords/not_keyword.zig").validate },
     // Reference
     .{ "$ref", @import("keywords/ref.zig").validate },
+    .{ "$dynamicRef", @import("keywords/dynamic_ref.zig").validate },
     // Conditional
     .{ "if", @import("keywords/if_then_else.zig").validate },
+    // Unevaluated (must be last — depends on other keywords' evaluations)
+    .{ "unevaluatedProperties", @import("keywords/unevaluated_properties.zig").validate },
+    .{ "unevaluatedItems", @import("keywords/unevaluated_items.zig").validate },
 };
+
+/// Check if the root schema indicates Draft 2020-12.
+fn isDraft2020x(root_schema: std.json.Value) bool {
+    const obj = switch (root_schema) {
+        .object => |o| o,
+        else => return false,
+    };
+    const schema_val = obj.get("$schema") orelse return false;
+    const schema_str = switch (schema_val) {
+        .string => |s| s,
+        else => return false,
+    };
+    return std.mem.indexOf(u8, schema_str, "2020-12") != null;
+}
+
+/// Keywords that belong to the validation vocabulary.
+const validation_keywords = [_][]const u8{
+    "type",           "enum",         "const",
+    "multipleOf",     "maximum",      "exclusiveMaximum",
+    "minimum",        "exclusiveMinimum",
+    "maxLength",      "minLength",    "pattern",
+    "maxItems",       "minItems",     "uniqueItems",
+    "maxContains",    "minContains",
+    "maxProperties",  "minProperties", "required",
+    "dependentRequired",
+};
+
+fn isValidationKeyword(name: []const u8) bool {
+    @setEvalBranchQuota(10000);
+    for (validation_keywords) |vk| {
+        if (std.mem.eql(u8, name, vk)) return true;
+    }
+    return false;
+}
+
+/// Check if the validation vocabulary is disabled by a custom metaschema.
+fn isValidationVocabDisabled(ctx: Context) bool {
+    const root_obj = switch (ctx.root_schema) {
+        .object => |o| o,
+        else => return false,
+    };
+    const schema_uri = switch (root_obj.get("$schema") orelse return false) {
+        .string => |s| s,
+        else => return false,
+    };
+    // Standard 2020-12 schema has validation enabled
+    if (std.mem.indexOf(u8, schema_uri, "json-schema.org/draft/2020-12/schema") != null) return false;
+
+    // Look up the metaschema in the registry
+    const reg = ctx.registry orelse return false;
+    const metaschema = reg.schemas.get(schema_uri) orelse return false;
+    const meta_obj = switch (metaschema) {
+        .object => |o| o,
+        else => return false,
+    };
+    const vocab = meta_obj.get("$vocabulary") orelse return false;
+    const vocab_obj = switch (vocab) {
+        .object => |o| o,
+        else => return false,
+    };
+
+    // If $vocabulary exists but doesn't include the validation vocabulary, it's disabled
+    return vocab_obj.get("https://json-schema.org/draft/2020-12/vocab/validation") == null;
+}
 
 /// Run all applicable keyword validators against the schema/instance pair.
 pub fn validateAll(ctx: Context) void {
     const schema_obj = ctx.schema.object;
 
     // Draft 7: $ref overrides all sibling keywords
+    // In 2020-12: $ref is just another keyword, siblings still apply
     if (schema_obj.get("$ref") != null) {
-        @import("keywords/ref.zig").validate(ctx);
-        return;
+        const is_2020 = isDraft2020x(ctx.root_schema);
+        if (!is_2020) {
+            @import("keywords/ref.zig").validate(ctx);
+            return;
+        }
     }
+
+    const skip_validation = isValidationVocabDisabled(ctx);
 
     inline for (keyword_table) |entry| {
         const keyword_name = entry[0];
         const validator_fn = entry[1];
         if (schema_obj.get(keyword_name) != null) {
-            validator_fn(ctx);
+            // Skip validation keywords if vocabulary says so
+            if (comptime isValidationKeyword(keyword_name)) {
+                if (!skip_validation) {
+                    validator_fn(ctx);
+                }
+            } else {
+                validator_fn(ctx);
+            }
         }
     }
 }
