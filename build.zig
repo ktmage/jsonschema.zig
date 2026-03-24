@@ -19,6 +19,17 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    // Bowtie harness binary
+    const harness = b.addExecutable(.{
+        .name = "bowtie-zig-jsonschema",
+        .root_source_file = b.path("src/harness.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    harness.root_module.addImport("jsonschema", lib_mod);
+    b.installArtifact(harness);
+
     // Tests
     const lib_test = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
