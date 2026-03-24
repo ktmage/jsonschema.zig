@@ -1,0 +1,31 @@
+name: Keyword Implementation
+description: Implement JSON Schema keyword validator(s)
+labels: ["keyword"]
+body:
+  - type: textarea
+    id: keywords
+    attributes:
+      label: Keywords
+      description: List of keywords to implement with brief descriptions.
+      placeholder: |
+        ### `keyword_name`
+        - Description of behavior
+        - `{"keyword_name": value}` — example schema
+    validations:
+      required: true
+  - type: textarea
+    id: test-files
+    attributes:
+      label: Test Files
+      description: Corresponding JSON Schema Test Suite files.
+      placeholder: |
+        - `tests/draft7/keyword.json`
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Edge cases, interactions with other keywords, design considerations.
+    validations:
+      required: false
