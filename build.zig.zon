@@ -1,0 +1,20 @@
+.{
+    .name = .jsonschema,
+    .version = "0.0.0",
+    .fingerprint = 0x376f6681bb34087e,
+    .minimum_zig_version = "0.14.0",
+
+    .dependencies = .{
+        .json_schema_test_suite = .{
+            .url = "https://github.com/json-schema-org/JSON-Schema-Test-Suite/archive/refs/tags/Test-JSON-Schema-Acceptance-1.037.tar.gz",
+            .hash = "N-V-__8AAHD1JwDutFCzjQu5KDj5ATZOteEFmTpCG1eY0lGQ",
+            .lazy = true,
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
