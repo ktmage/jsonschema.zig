@@ -13,9 +13,13 @@ pub const Context = struct {
     instance_path: []const u8,
     schema_path: []const u8,
     errors: *std.ArrayList(ValidationError),
+    registry: ?*jsonschema.SchemaRegistry = null,
+    base_uri: []const u8 = "",
+    /// Base URI before this schema's own $id is applied.
+    /// Used by $ref to avoid sibling $id changing its resolution scope.
+    ref_base_uri: []const u8 = "",
 
     /// Recursively validate instance against a sub-schema.
-    /// Used by composition keywords (allOf, anyOf, etc.) and $ref.
     pub fn validateSubschema(
         self: Context,
         sub_schema: std.json.Value,
@@ -23,13 +27,15 @@ pub const Context = struct {
         instance_path: []const u8,
         schema_path: []const u8,
     ) jsonschema.ValidationResult {
-        return jsonschema.validateWithPath(
+        return jsonschema.validateFull(
             self.allocator,
             self.root_schema,
             sub_schema,
             instance,
             instance_path,
             schema_path,
+            self.registry,
+            self.base_uri,
         );
     }
 

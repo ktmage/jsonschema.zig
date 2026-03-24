@@ -1,25 +1,15 @@
 const std = @import("std");
 const jsonschema = @import("main.zig");
+const SchemaRegistry = jsonschema.SchemaRegistry;
 const build_options = @import("build_options");
 
-const TestCase = struct {
-    description: []const u8,
-    schema: std.json.Value,
-    tests: []const TestInstance,
-};
-
-const TestInstance = struct {
-    description: []const u8,
-    data: std.json.Value,
-    valid: bool,
-};
-
-fn parseTestFile(allocator: std.mem.Allocator, contents: []const u8) !std.json.Parsed(std.json.Value) {
-    return std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
-}
-
-fn runTestFile(backing_allocator: std.mem.Allocator, file_name: []const u8, contents: []const u8) !struct { passed: usize, failed: usize, total: usize } {
-    const parsed = try parseTestFile(backing_allocator, contents);
+fn runTestFile(
+    backing_allocator: std.mem.Allocator,
+    file_name: []const u8,
+    contents: []const u8,
+    remotes_registry: *SchemaRegistry,
+) !struct { passed: usize, failed: usize, total: usize } {
+    const parsed = try std.json.parseFromSlice(std.json.Value, backing_allocator, contents, .{});
     defer parsed.deinit();
 
     const test_groups = parsed.value.array.items;
@@ -36,40 +26,35 @@ fn runTestFile(backing_allocator: std.mem.Allocator, file_name: []const u8, cont
             const instance = test_obj.get("data") orelse continue;
             const expected = (test_obj.get("valid") orelse continue).bool;
 
-            // Use arena allocator per test to avoid leaking intermediate path strings
             var arena = std.heap.ArenaAllocator.init(backing_allocator);
             defer arena.deinit();
             const allocator = arena.allocator();
 
-            const result = jsonschema.validate(allocator, schema, instance);
+            // Build a per-test registry: start with remotes, then scan schema $ids
+            var registry = SchemaRegistry.init(allocator);
+
+            // Copy remotes
+            var remote_it = remotes_registry.schemas.iterator();
+            while (remote_it.next()) |entry| {
+                registry.addSchema(entry.key_ptr.*, entry.value_ptr.*);
+            }
+
+            // Scan schema for $id declarations
+            const base_uri = getSchemaId(schema) orelse "";
+            if (base_uri.len > 0) {
+                registry.addSchema(base_uri, schema);
+            }
+            registry.scanIds(base_uri, schema);
+
+            const result = jsonschema.validateWithRegistry(allocator, schema, instance, &registry);
 
             if (result.isValid() == expected) {
                 passed += 1;
             } else {
-                const group_desc = blk: {
-                    if (group_obj.get("description")) |d| {
-                        break :blk switch (d) {
-                            .string => |s| s,
-                            else => "?",
-                        };
-                    }
-                    break :blk "?";
-                };
-                const test_desc = blk: {
-                    if (test_obj.get("description")) |d| {
-                        break :blk switch (d) {
-                            .string => |s| s,
-                            else => "?",
-                        };
-                    }
-                    break :blk "?";
-                };
+                const group_desc = getDesc(group_obj);
+                const test_desc = getDesc(test_obj);
                 std.debug.print("  FAIL [{s}] {s} > {s} (expected {}, got {})\n", .{
-                    file_name,
-                    group_desc,
-                    test_desc,
-                    expected,
-                    result.isValid(),
+                    file_name, group_desc, test_desc, expected, result.isValid(),
                 });
                 failed += 1;
             }
@@ -79,10 +64,76 @@ fn runTestFile(backing_allocator: std.mem.Allocator, file_name: []const u8, cont
     return .{ .passed = passed, .failed = failed, .total = passed + failed };
 }
 
+fn getDesc(obj: std.json.ObjectMap) []const u8 {
+    if (obj.get("description")) |d| {
+        return switch (d) {
+            .string => |s| s,
+            else => "?",
+        };
+    }
+    return "?";
+}
+
+fn getSchemaId(schema: std.json.Value) ?[]const u8 {
+    const obj = switch (schema) {
+        .object => |o| o,
+        else => return null,
+    };
+    const id_val = obj.get("$id") orelse return null;
+    return switch (id_val) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+/// Load remote schemas from the test suite's remotes/ directory.
+fn loadRemotes(
+    allocator: std.mem.Allocator,
+    registry: *SchemaRegistry,
+    dir: std.fs.Dir,
+    base_path: []const u8,
+    parsed_list: *std.ArrayList(std.json.Parsed(std.json.Value)),
+) void {
+    var iter = dir.iterate();
+    while (iter.next() catch return) |entry| {
+        const sub_path = std.fmt.allocPrint(allocator, "{s}{s}", .{ base_path, entry.name }) catch continue;
+
+        if (entry.kind == .directory) {
+            const dir_path = std.fmt.allocPrint(allocator, "{s}{s}/", .{ base_path, entry.name }) catch continue;
+            var sub_dir = dir.openDir(entry.name, .{ .iterate = true }) catch continue;
+            defer sub_dir.close();
+            loadRemotes(allocator, registry, sub_dir, dir_path, parsed_list);
+        } else if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".json")) {
+            const contents = dir.readFileAlloc(allocator, entry.name, 10 * 1024 * 1024) catch continue;
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, contents, .{}) catch continue;
+            // Keep parsed alive by storing it
+            parsed_list.append(parsed) catch continue;
+            const uri = std.fmt.allocPrint(allocator, "http://localhost:1234/{s}", .{sub_path}) catch continue;
+            registry.addSchema(uri, parsed.value);
+            // Also scan for $id within remote schemas
+            registry.scanIds(uri, parsed.value);
+        }
+    }
+}
+
 test "JSON Schema Test Suite — Draft 7" {
     const allocator = std.testing.allocator;
     const path = build_options.test_suite_path;
+    const remotes_path = build_options.remotes_path;
 
+    // Load remote schemas
+    var remotes_arena = std.heap.ArenaAllocator.init(allocator);
+    defer remotes_arena.deinit();
+    const remotes_alloc = remotes_arena.allocator();
+
+    var remotes_registry = SchemaRegistry.init(remotes_alloc);
+    var parsed_remotes = std.ArrayList(std.json.Parsed(std.json.Value)).init(remotes_alloc);
+
+    var remotes_dir = try std.fs.openDirAbsolute(remotes_path, .{ .iterate = true });
+    defer remotes_dir.close();
+    loadRemotes(remotes_alloc, &remotes_registry, remotes_dir, "", &parsed_remotes);
+
+    // Run test files
     var dir = try std.fs.openDirAbsolute(path, .{ .iterate = true });
     defer dir.close();
 
@@ -101,7 +152,7 @@ test "JSON Schema Test Suite — Draft 7" {
         };
         defer allocator.free(contents);
 
-        const counts = runTestFile(allocator, entry.name, contents) catch |err| {
+        const counts = runTestFile(allocator, entry.name, contents, &remotes_registry) catch |err| {
             std.debug.print("Failed to parse {s}: {}\n", .{ entry.name, err });
             continue;
         };
@@ -128,7 +179,5 @@ test "JSON Schema Test Suite — Draft 7" {
         },
     );
 
-    // Don't fail the test — we expect most tests to fail until keywords are implemented.
-    // This runner is for reporting progress.
     try std.testing.expect(file_count > 0);
 }

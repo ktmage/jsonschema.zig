@@ -3,15 +3,13 @@ const Allocator = std.mem.Allocator;
 
 pub const JsonPointer = @import("json_pointer.zig");
 pub const Validator = @import("validator.zig");
+pub const SchemaRegistry = @import("schema_registry.zig").SchemaRegistry;
+const schema_registry_mod = @import("schema_registry.zig");
 
 pub const ValidationError = struct {
-    /// JSON Pointer path to the failing instance
     instance_path: []const u8,
-    /// JSON Pointer path to the schema keyword that failed
     schema_path: []const u8,
-    /// The keyword that produced this error
     keyword: []const u8,
-    /// Human-readable error message
     message: []const u8,
 };
 
@@ -33,16 +31,23 @@ pub const ValidationResult = struct {
     }
 };
 
-/// Validate an instance against a JSON schema.
 pub fn validate(
     allocator: Allocator,
     schema: std.json.Value,
     instance: std.json.Value,
 ) ValidationResult {
-    return validateWithPath(allocator, schema, schema, instance, "", "");
+    return validateFull(allocator, schema, schema, instance, "", "", null, "");
 }
 
-/// Validate with explicit root schema and paths (for recursive validation).
+pub fn validateWithRegistry(
+    allocator: Allocator,
+    schema: std.json.Value,
+    instance: std.json.Value,
+    registry: *SchemaRegistry,
+) ValidationResult {
+    return validateFull(allocator, schema, schema, instance, "", "", registry, "");
+}
+
 pub fn validateWithPath(
     allocator: Allocator,
     root_schema: std.json.Value,
@@ -51,7 +56,31 @@ pub fn validateWithPath(
     instance_path: []const u8,
     schema_path: []const u8,
 ) ValidationResult {
-    // Boolean schema: true validates everything, false rejects everything
+    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, null, "");
+}
+
+pub fn validateWithContext(
+    allocator: Allocator,
+    root_schema: std.json.Value,
+    schema: std.json.Value,
+    instance: std.json.Value,
+    instance_path: []const u8,
+    schema_path: []const u8,
+    registry: ?*SchemaRegistry,
+) ValidationResult {
+    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, registry, "");
+}
+
+pub fn validateFull(
+    allocator: Allocator,
+    root_schema: std.json.Value,
+    schema: std.json.Value,
+    instance: std.json.Value,
+    instance_path: []const u8,
+    schema_path: []const u8,
+    registry: ?*SchemaRegistry,
+    parent_base_uri: []const u8,
+) ValidationResult {
     switch (schema) {
         .bool => |b| {
             if (b) {
@@ -66,6 +95,24 @@ pub fn validateWithPath(
         },
     }
 
+    // Determine base URI: if this schema has $id, resolve it against parent
+    // In Draft 7, $ref overrides sibling keywords, so $id sibling of $ref
+    // should NOT affect $ref resolution. We track parent_base_uri separately.
+    const has_ref = schema.object.get("$ref") != null;
+    const base_uri = blk: {
+        if (schema.object.get("$id")) |id_val| {
+            if (asString(id_val)) |id_str| {
+                if (id_str.len > 0 and id_str[0] != '#') {
+                    break :blk schema_registry_mod.resolveUri(allocator, parent_base_uri, id_str);
+                }
+            }
+        }
+        break :blk parent_base_uri;
+    };
+
+    // For $ref resolution: if $ref is present, use parent_base_uri (ignore sibling $id)
+    const ref_base_uri = if (has_ref) parent_base_uri else base_uri;
+
     var errors = std.ArrayList(ValidationError).init(allocator);
 
     const ctx = Validator.Context{
@@ -76,6 +123,9 @@ pub fn validateWithPath(
         .instance_path = instance_path,
         .schema_path = schema_path,
         .errors = &errors,
+        .registry = registry,
+        .base_uri = base_uri,
+        .ref_base_uri = ref_base_uri,
     };
 
     Validator.validateAll(ctx);
@@ -83,6 +133,13 @@ pub fn validateWithPath(
     return .{
         .errors = errors.toOwnedSlice() catch &.{},
         .allocator = allocator,
+    };
+}
+
+fn asString(value: std.json.Value) ?[]const u8 {
+    return switch (value) {
+        .string => |s| s,
+        else => null,
     };
 }
 
