@@ -53,14 +53,56 @@ pub const KeywordValidator = *const fn (ctx: Context) void;
 /// To add a new keyword, add an entry to this table and create the
 /// corresponding file in src/keywords/.
 const keyword_table = .{
-    // Phase 2 keywords will be registered here.
-    // Example:
-    // .{ "type", @import("keywords/type_keyword.zig").validate },
+    // Type checking
+    .{ "type", @import("keywords/type_keyword.zig").validate },
+    .{ "enum", @import("keywords/enum_keyword.zig").validate },
+    .{ "const", @import("keywords/const_keyword.zig").validate },
+    // Numeric
+    .{ "minimum", @import("keywords/minimum.zig").validate },
+    .{ "maximum", @import("keywords/maximum.zig").validate },
+    .{ "exclusiveMinimum", @import("keywords/exclusive_minimum.zig").validate },
+    .{ "exclusiveMaximum", @import("keywords/exclusive_maximum.zig").validate },
+    .{ "multipleOf", @import("keywords/multiple_of.zig").validate },
+    // String
+    .{ "minLength", @import("keywords/min_length.zig").validate },
+    .{ "maxLength", @import("keywords/max_length.zig").validate },
+    .{ "pattern", @import("keywords/pattern.zig").validate },
+    // Array
+    .{ "items", @import("keywords/items.zig").validate },
+    .{ "additionalItems", @import("keywords/additional_items.zig").validate },
+    .{ "minItems", @import("keywords/min_items.zig").validate },
+    .{ "maxItems", @import("keywords/max_items.zig").validate },
+    .{ "uniqueItems", @import("keywords/unique_items.zig").validate },
+    .{ "contains", @import("keywords/contains.zig").validate },
+    // Object
+    .{ "properties", @import("keywords/properties.zig").validate },
+    .{ "required", @import("keywords/required.zig").validate },
+    .{ "additionalProperties", @import("keywords/additional_properties.zig").validate },
+    .{ "patternProperties", @import("keywords/pattern_properties.zig").validate },
+    .{ "minProperties", @import("keywords/min_properties.zig").validate },
+    .{ "maxProperties", @import("keywords/max_properties.zig").validate },
+    .{ "propertyNames", @import("keywords/property_names.zig").validate },
+    .{ "dependencies", @import("keywords/dependencies.zig").validate },
+    // Logical composition
+    .{ "allOf", @import("keywords/all_of.zig").validate },
+    .{ "anyOf", @import("keywords/any_of.zig").validate },
+    .{ "oneOf", @import("keywords/one_of.zig").validate },
+    .{ "not", @import("keywords/not_keyword.zig").validate },
+    // Reference
+    .{ "$ref", @import("keywords/ref.zig").validate },
+    // Conditional
+    .{ "if", @import("keywords/if_then_else.zig").validate },
 };
 
 /// Run all applicable keyword validators against the schema/instance pair.
 pub fn validateAll(ctx: Context) void {
     const schema_obj = ctx.schema.object;
+
+    // Draft 7: $ref overrides all sibling keywords
+    if (schema_obj.get("$ref") != null) {
+        @import("keywords/ref.zig").validate(ctx);
+        return;
+    }
 
     inline for (keyword_table) |entry| {
         const keyword_name = entry[0];

@@ -18,8 +18,8 @@ fn parseTestFile(allocator: std.mem.Allocator, contents: []const u8) !std.json.P
     return std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
 }
 
-fn runTestFile(allocator: std.mem.Allocator, file_name: []const u8, contents: []const u8) !struct { passed: usize, failed: usize, total: usize } {
-    const parsed = try parseTestFile(allocator, contents);
+fn runTestFile(backing_allocator: std.mem.Allocator, file_name: []const u8, contents: []const u8) !struct { passed: usize, failed: usize, total: usize } {
+    const parsed = try parseTestFile(backing_allocator, contents);
     defer parsed.deinit();
 
     const test_groups = parsed.value.array.items;
@@ -36,8 +36,12 @@ fn runTestFile(allocator: std.mem.Allocator, file_name: []const u8, contents: []
             const instance = test_obj.get("data") orelse continue;
             const expected = (test_obj.get("valid") orelse continue).bool;
 
+            // Use arena allocator per test to avoid leaking intermediate path strings
+            var arena = std.heap.ArenaAllocator.init(backing_allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+
             const result = jsonschema.validate(allocator, schema, instance);
-            defer result.deinit();
 
             if (result.isValid() == expected) {
                 passed += 1;
