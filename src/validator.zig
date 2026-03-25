@@ -8,7 +8,7 @@ const CompiledSchema = compiled_mod.CompiledSchema;
 const SimpleType = compiled_mod.SimpleType;
 
 /// Fast inline type check without going through the full validator dispatch.
-fn matchesSimpleType(instance: std.json.Value, simple_type: SimpleType) bool {
+pub fn matchesSimpleType(instance: std.json.Value, simple_type: SimpleType) bool {
     return switch (simple_type) {
         .none => true,
         .null => instance == .null,

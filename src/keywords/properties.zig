@@ -2,6 +2,7 @@ const std = @import("std");
 const validator = @import("../validator.zig");
 const Context = validator.Context;
 const JsonPointer = @import("../json_pointer.zig");
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
     const value = ctx.current_keyword_value orelse ctx.schema.object.get("properties") orelse return;
@@ -22,9 +23,18 @@ pub fn validate(ctx: Context) void {
 
         const instance_value = instance_obj.get(prop_name) orelse continue;
 
-        // Fast path: check validity first without building paths
-        if (ctx.compiled != null and ctx.isSubschemaValid(prop_schema, instance_value)) {
-            continue; // valid — skip path allocation entirely
+        // Ultra-fast: simple type check without any function calls
+        if (ctx.compiled) |c| {
+            if (c.getNode(prop_schema)) |node| {
+                if (node.simple_type != .none) {
+                    if (validator.matchesSimpleType(instance_value, node.simple_type)) continue;
+                    // Invalid — fall through to slow path for error details
+                } else {
+                    if (ctx.isSubschemaValid(prop_schema, instance_value)) continue;
+                }
+            } else {
+                if (ctx.isSubschemaValid(prop_schema, instance_value)) continue;
+            }
         }
 
         // Slow path: build paths and collect errors
