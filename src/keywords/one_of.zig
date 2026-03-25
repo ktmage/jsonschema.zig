@@ -20,6 +20,7 @@ pub fn validate(ctx: Context) void {
         defer result.deinit();
         if (result.isValid()) {
             match_count += 1;
+            if (match_count > 1) break;
         }
     }
 
