@@ -142,10 +142,12 @@ pub const Context = struct {
                             return matchesSimpleType(instance, node.simple_type);
                         }
                     }
-                    // Use a sentinel error list that just tracks "has any error"
-                    var errors = std.ArrayList(ValidationError).init(self.allocator);
+                    // Use stack-based allocator to avoid heap allocation entirely
+                    var buf: [512]u8 = undefined;
+                    var fba = std.heap.FixedBufferAllocator.init(&buf);
+                    var errors = std.ArrayList(ValidationError).init(fba.allocator());
                     const child = Context{
-                        .allocator = self.allocator,
+                        .allocator = fba.allocator(),
                         .root_schema = self.root_schema,
                         .schema = sub_schema,
                         .instance = instance,
