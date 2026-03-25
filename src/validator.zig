@@ -4,6 +4,7 @@ const jsonschema = @import("main.zig");
 const ValidationError = jsonschema.ValidationError;
 const JsonPointer = jsonschema.JsonPointer;
 pub const RegexCache = @import("regex_cache.zig").RegexCache;
+const schema_registry_mod = @import("schema_registry.zig");
 
 /// Dynamic scope entry: tracks which schema resource is being evaluated
 pub const DynamicScopeEntry = struct {
@@ -29,6 +30,8 @@ pub const Context = struct {
     dynamic_scope: ?*std.ArrayList(DynamicScopeEntry) = null,
     /// When true, skip error detail construction for fast boolean-only validation.
     valid_only: bool = false,
+    /// Cached result of isDraft2020() on root_schema.
+    is_draft_2020: bool = false,
     /// Optional regex cache for avoiding repeated regcomp() calls.
     regex_cache: ?*RegexCache = null,
 
@@ -54,20 +57,84 @@ pub const Context = struct {
     }
 
     /// Fast boolean-only sub-schema validation (no error details, no path building).
+    /// Reuses parent context state to avoid redundant $id resolution, isDraft2020 checks,
+    /// and ArrayList allocations.
     pub fn isSubschemaValid(
         self: Context,
         sub_schema: std.json.Value,
         instance: std.json.Value,
     ) bool {
-        return jsonschema.isValidFull(
-            self.allocator,
-            self.root_schema,
-            sub_schema,
-            instance,
-            self.registry,
-            self.base_uri,
-            self.dynamic_scope,
-        );
+        // Short-circuit for boolean schemas
+        switch (sub_schema) {
+            .bool => |b| return b,
+            .object => {},
+            else => return true,
+        }
+
+        // Compute base_uri for sub-schema (handle $id inline)
+        const has_ref = sub_schema.object.get("$ref") != null;
+        const sub_base = blk: {
+            if (sub_schema.object.get("$id")) |id_val| {
+                switch (id_val) {
+                    .string => |id_str| {
+                        if (id_str.len > 0 and id_str[0] != '#') {
+                            // Check if already registered (same logic as validateFull)
+                            if (self.registry) |reg| {
+                                const pbu_stripped = schema_registry_mod.stripFragment(self.base_uri);
+                                if (reg.schemas.get(pbu_stripped)) |registered| {
+                                    if (registered.object.keys().ptr == sub_schema.object.keys().ptr) {
+                                        break :blk self.base_uri;
+                                    }
+                                }
+                            }
+                            break :blk schema_registry_mod.resolveUri(self.allocator, self.base_uri, id_str);
+                        }
+                    },
+                    else => {},
+                }
+            }
+            break :blk self.base_uri;
+        };
+
+        const ref_base_uri = if (has_ref and !self.is_draft_2020) self.base_uri else sub_base;
+
+        // Track dynamic scope
+        const has_new_scope = sub_schema.object.get("$id") != null;
+        if (self.dynamic_scope) |ds| {
+            if (has_new_scope) {
+                ds.append(.{ .base_uri = sub_base, .schema = sub_schema }) catch {};
+            }
+        }
+        defer {
+            if (self.dynamic_scope) |ds| {
+                if (has_new_scope and ds.items.len > 0) {
+                    _ = ds.pop();
+                }
+            }
+        }
+
+        var errors = std.ArrayList(ValidationError).init(self.allocator);
+        defer errors.deinit();
+
+        const child_ctx = Context{
+            .allocator = self.allocator,
+            .root_schema = self.root_schema,
+            .schema = sub_schema,
+            .instance = instance,
+            .instance_path = "",
+            .schema_path = "",
+            .errors = &errors,
+            .registry = self.registry,
+            .base_uri = sub_base,
+            .ref_base_uri = ref_base_uri,
+            .dynamic_scope = self.dynamic_scope,
+            .valid_only = true,
+            .is_draft_2020 = self.is_draft_2020,
+            .regex_cache = self.regex_cache,
+        };
+
+        validateAll(child_ctx);
+        return errors.items.len == 0;
     }
 
     /// Add a validation error to the error list.
@@ -219,8 +286,7 @@ pub fn validateAll(ctx: Context) void {
     // Draft 7: $ref overrides all sibling keywords
     // In 2020-12: $ref is just another keyword, siblings still apply
     if (schema_obj.get("$ref") != null) {
-        const is_2020 = isDraft2020x(ctx.root_schema);
-        if (!is_2020) {
+        if (!ctx.is_draft_2020) {
             @import("keywords/ref.zig").validate(ctx);
             return;
         }

@@ -139,6 +139,7 @@ pub fn isValidFull(
         .ref_base_uri = ref_base_uri,
         .dynamic_scope = dynamic_scope,
         .valid_only = true,
+        .is_draft_2020 = is_2020,
         .regex_cache = if (registry) |reg| &reg.regex_cache else null,
     };
 
@@ -291,6 +292,7 @@ pub fn validateFull(
         .base_uri = base_uri,
         .ref_base_uri = ref_base_uri,
         .dynamic_scope = dynamic_scope,
+        .is_draft_2020 = is_2020,
         .regex_cache = if (registry) |reg| &reg.regex_cache else null,
     };
 
