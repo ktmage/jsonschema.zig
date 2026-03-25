@@ -96,14 +96,19 @@ pub const SimpleType = enum(u8) {
 /// actually present in the original schema object, avoiding the need to probe
 /// the hashmap for all 30+ keywords at validation time.
 pub const CompiledNode = struct {
-    /// Pre-filtered list of validators for keywords present in this node.
-    validators: []const Validator.KeywordValidator,
+    /// Pre-filtered list of validators with their pre-extracted keyword values.
+    entries: []const ValidatorEntry,
     /// True if this node has $ref AND the schema is Draft 7 (not 2020-12),
     /// meaning $ref overrides all sibling keywords.
     ref_overrides: bool,
     /// If this schema is simply {"type": "xxx"}, store the type tag for
     /// ultra-fast validation without going through the full validator dispatch.
     simple_type: SimpleType = .none,
+
+    pub const ValidatorEntry = struct {
+        func: Validator.KeywordValidator,
+        keyword_value: std.json.Value,
+    };
 };
 
 // ---------------------------------------------------------------------------
@@ -123,24 +128,23 @@ fn compileNode(
             // Already compiled?
             if (node_map.get(key) != null) return;
 
-            // Determine which validators are present
-            var validators = std.ArrayList(Validator.KeywordValidator).init(alloc);
+            // Determine which validators are present and pre-extract their values
+            var entries = std.ArrayList(CompiledNode.ValidatorEntry).init(alloc);
 
             const has_ref = obj.get("$ref") != null;
             const ref_overrides = has_ref and !is_2020;
 
             if (!ref_overrides) {
-                // Normal path: collect all present keyword validators
                 inline for (Validator.keyword_table) |entry| {
                     const keyword_name = entry[0];
                     const validator_fn = entry[1];
-                    if (obj.get(keyword_name) != null) {
+                    if (obj.get(keyword_name)) |kw_val| {
                         if (comptime Validator.isValidationKeyword(keyword_name)) {
                             if (!validation_vocab_disabled) {
-                                validators.append(validator_fn) catch {};
+                                entries.append(.{ .func = validator_fn, .keyword_value = kw_val }) catch {};
                             }
                         } else {
-                            validators.append(validator_fn) catch {};
+                            entries.append(.{ .func = validator_fn, .keyword_value = kw_val }) catch {};
                         }
                     }
                 }
@@ -154,7 +158,7 @@ fn compileNode(
 
             const node = alloc.create(CompiledNode) catch return;
             node.* = .{
-                .validators = validators.toOwnedSlice() catch &.{},
+                .entries = entries.toOwnedSlice() catch &.{},
                 .ref_overrides = ref_overrides,
                 .simple_type = simple_type,
             };
@@ -319,7 +323,7 @@ test "compile empty schema" {
     // Empty schema should have a node with 0 validators
     const node = compiled.getNode(parsed.value);
     try std.testing.expect(node != null);
-    try std.testing.expectEqual(@as(usize, 0), node.?.validators.len);
+    try std.testing.expectEqual(@as(usize, 0), node.?.entries.len);
 }
 
 test "compile schema with type keyword" {
@@ -335,7 +339,7 @@ test "compile schema with type keyword" {
 
     const node = compiled.getNode(parsed.value);
     try std.testing.expect(node != null);
-    try std.testing.expectEqual(@as(usize, 1), node.?.validators.len);
+    try std.testing.expectEqual(@as(usize, 1), node.?.entries.len);
 }
 
 test "compile schema with properties recurses" {
@@ -352,14 +356,14 @@ test "compile schema with properties recurses" {
     // Root node: type + properties = 2 validators
     const root_node = compiled.getNode(parsed.value);
     try std.testing.expect(root_node != null);
-    try std.testing.expectEqual(@as(usize, 2), root_node.?.validators.len);
+    try std.testing.expectEqual(@as(usize, 2), root_node.?.entries.len);
 
     // Sub-schema {"type": "string"} should also be compiled
     const props = parsed.value.object.get("properties").?.object;
     const name_schema_val = props.get("name").?;
     const name_node = compiled.getNode(name_schema_val);
     try std.testing.expect(name_node != null);
-    try std.testing.expectEqual(@as(usize, 1), name_node.?.validators.len);
+    try std.testing.expectEqual(@as(usize, 1), name_node.?.entries.len);
 }
 
 test "compiled validation produces correct results" {

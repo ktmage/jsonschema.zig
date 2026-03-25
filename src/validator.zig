@@ -49,6 +49,8 @@ pub const Context = struct {
     dynamic_scope: ?*std.ArrayList(DynamicScopeEntry) = null,
     /// Pre-compiled schema for fast dispatch (null = use legacy path).
     compiled: ?*const CompiledSchema = null,
+    /// Current keyword value, set by compiled dispatch to avoid re-lookup.
+    current_keyword_value: ?std.json.Value = null,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -321,8 +323,10 @@ pub fn validateAll(ctx: Context) void {
                 }
                 return;
             }
-            for (node.validators) |validator_fn| {
-                validator_fn(ctx);
+            for (node.entries) |entry| {
+                var child = ctx;
+                child.current_keyword_value = entry.keyword_value;
+                entry.func(child);
             }
             return;
         }

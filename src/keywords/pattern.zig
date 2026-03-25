@@ -4,8 +4,8 @@ const Context = validator.Context;
 const c = @cImport(@cInclude("regex.h"));
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("pattern") orelse return;
+    // Use pre-extracted value if available
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("pattern") orelse return;
     const instance_str = switch (ctx.instance) {
         .string => |s| s,
         else => return,

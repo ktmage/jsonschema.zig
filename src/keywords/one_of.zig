@@ -113,8 +113,7 @@ fn jsonValueEql(a: std.json.Value, b: std.json.Value) bool {
 }
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("oneOf") orelse return;
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("oneOf") orelse return;
     const sub_schemas = switch (value) {
         .array => |a| a.items,
         else => return,

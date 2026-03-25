@@ -5,8 +5,7 @@ const JsonPointer = @import("../json_pointer.zig");
 const c = @cImport(@cInclude("regex.h"));
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("patternProperties") orelse return;
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("patternProperties") orelse return;
     const pattern_schemas = switch (value) {
         .object => |o| o,
         else => return,

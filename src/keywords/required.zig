@@ -3,8 +3,7 @@ const validator = @import("../validator.zig");
 const Context = validator.Context;
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("required") orelse return;
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("required") orelse return;
     const required_array = switch (value) {
         .array => |a| a.items,
         else => return,

@@ -3,8 +3,8 @@ const validator = @import("../validator.zig");
 const Context = validator.Context;
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("maxLength") orelse return;
+    // Use pre-extracted value if available
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("maxLength") orelse return;
     const instance_str = switch (ctx.instance) {
         .string => |s| s,
         else => return,

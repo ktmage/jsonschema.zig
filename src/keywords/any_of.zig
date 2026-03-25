@@ -4,8 +4,7 @@ const Context = validator.Context;
 const JsonPointer = @import("../json_pointer.zig");
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("anyOf") orelse return;
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("anyOf") orelse return;
     const sub_schemas = switch (value) {
         .array => |a| a.items,
         else => return,

@@ -3,8 +3,8 @@ const validator = @import("../validator.zig");
 const Context = validator.Context;
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("minimum") orelse return;
+    // Use pre-extracted value if available
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("minimum") orelse return;
 
     const instance_num: f64 = switch (ctx.instance) {
         .integer => |n| @floatFromInt(n),

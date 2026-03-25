@@ -3,8 +3,8 @@ const validator = @import("../validator.zig");
 const Context = validator.Context;
 
 pub fn validate(ctx: Context) void {
-    const schema_obj = ctx.schema.object;
-    const value = schema_obj.get("minProperties") orelse return;
+    // Use pre-extracted value if available
+    const value = ctx.current_keyword_value orelse ctx.schema.object.get("minProperties") orelse return;
 
     const limit: u64 = switch (value) {
         .integer => |n| if (n >= 0) @intCast(n) else return,
