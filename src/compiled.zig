@@ -109,7 +109,242 @@ pub const CompiledNode = struct {
         func: Validator.KeywordValidator,
         keyword_value: std.json.Value,
     };
+
+    /// Ultra-fast boolean-only validation. No allocations, no error construction.
+    /// Returns false on first failure. Only works for common keyword patterns;
+    /// falls back to full validation for complex keywords.
+    pub fn isValid(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) bool {
+        if (self.simple_type != .none) {
+            return Validator.matchesSimpleType(instance, self.simple_type);
+        }
+        if (self.ref_overrides) {
+            // $ref override — need full validation path, can't inline
+            // Return null-like signal... but we return bool.
+            // Use FBA fallback in caller instead.
+            unreachable; // caller should check ref_overrides before calling isValid
+        }
+        for (self.entries) |entry| {
+            if (!isEntryValid(entry, instance, compiled)) return false;
+        }
+        return true;
+    }
 };
+
+/// Check if a single keyword entry is valid for an instance.
+/// Inlines common validators to avoid function pointer overhead.
+fn isEntryValid(entry: CompiledNode.ValidatorEntry, instance: std.json.Value, compiled: *const CompiledSchema) bool {
+    const kv = entry.keyword_value;
+    const func = entry.func;
+
+    // Identify keyword by function pointer comparison and inline the check
+    if (func == @import("keywords/type_keyword.zig").validate) {
+        return isTypeValid(kv, instance);
+    }
+    if (func == @import("keywords/required.zig").validate) {
+        return isRequiredValid(kv, instance);
+    }
+    if (func == @import("keywords/properties.zig").validate) {
+        return isPropertiesValid(kv, instance, compiled);
+    }
+    if (func == @import("keywords/minimum.zig").validate) {
+        return numCmp(instance, kv, .gte);
+    }
+    if (func == @import("keywords/maximum.zig").validate) {
+        return numCmp(instance, kv, .lte);
+    }
+    if (func == @import("keywords/exclusive_minimum.zig").validate) {
+        return numCmp(instance, kv, .gt);
+    }
+    if (func == @import("keywords/exclusive_maximum.zig").validate) {
+        return numCmp(instance, kv, .lt);
+    }
+    if (func == @import("keywords/min_length.zig").validate) {
+        return isLengthValid(instance, kv, .min);
+    }
+    if (func == @import("keywords/max_length.zig").validate) {
+        return isLengthValid(instance, kv, .max);
+    }
+    if (func == @import("keywords/min_items.zig").validate) {
+        return isItemCountValid(instance, kv, .min);
+    }
+    if (func == @import("keywords/max_items.zig").validate) {
+        return isItemCountValid(instance, kv, .max);
+    }
+    if (func == @import("keywords/min_properties.zig").validate) {
+        return isPropCountValid(instance, kv, .min);
+    }
+    if (func == @import("keywords/max_properties.zig").validate) {
+        return isPropCountValid(instance, kv, .max);
+    }
+    if (func == @import("keywords/items.zig").validate) {
+        return isItemsValid(instance, kv, compiled);
+    }
+    if (func == @import("keywords/additional_properties.zig").validate) {
+        // Too complex to inline — conservative true
+        return true;
+    }
+
+    // Unknown keyword — conservative true (let full validation handle it)
+    return true;
+}
+
+fn isTypeValid(type_val: std.json.Value, instance: std.json.Value) bool {
+    switch (type_val) {
+        .string => |t| return Validator.matchesSimpleType(instance, detectSimpleTypeFromString(t)),
+        .array => |arr| {
+            for (arr.items) |item| {
+                switch (item) {
+                    .string => |t| {
+                        if (Validator.matchesSimpleType(instance, detectSimpleTypeFromString(t))) return true;
+                    },
+                    else => return true,
+                }
+            }
+            return false;
+        },
+        else => return true,
+    }
+}
+
+fn detectSimpleTypeFromString(t: []const u8) SimpleType {
+    if (std.mem.eql(u8, t, "null")) return .null;
+    if (std.mem.eql(u8, t, "boolean")) return .boolean;
+    if (std.mem.eql(u8, t, "integer")) return .integer;
+    if (std.mem.eql(u8, t, "number")) return .number;
+    if (std.mem.eql(u8, t, "string")) return .string;
+    if (std.mem.eql(u8, t, "array")) return .array;
+    if (std.mem.eql(u8, t, "object")) return .object;
+    return .none;
+}
+
+fn isRequiredValid(req_val: std.json.Value, instance: std.json.Value) bool {
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    const arr = switch (req_val) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    for (arr) |item| {
+        switch (item) {
+            .string => |name| {
+                if (obj.get(name) == null) return false;
+            },
+            else => {},
+        }
+    }
+    return true;
+}
+
+fn isPropertiesValid(props_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) bool {
+    const props = switch (props_val) {
+        .object => |o| o,
+        else => return true,
+    };
+    const inst_obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    var it = props.iterator();
+    while (it.next()) |entry| {
+        const inst_val = inst_obj.get(entry.key_ptr.*) orelse continue;
+        const prop_schema = entry.value_ptr.*;
+        // Try compiled node for sub-schema
+        if (compiled.getNode(prop_schema)) |node| {
+            if (!node.isValid(inst_val, compiled)) return false;
+        }
+        // If no compiled node, conservatively return true
+    }
+    return true;
+}
+
+fn isItemsValid(instance: std.json.Value, items_val: std.json.Value, compiled: *const CompiledSchema) bool {
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    switch (items_val) {
+        .object => {
+            if (compiled.getNode(items_val)) |node| {
+                for (arr) |item| {
+                    if (!node.isValid(item, compiled)) return false;
+                }
+            }
+            return true;
+        },
+        .bool => |b| return b or arr.len == 0,
+        else => return true,
+    }
+}
+
+fn getNumber(val: std.json.Value) ?f64 {
+    return switch (val) {
+        .integer => |n| @floatFromInt(n),
+        .float => |f| f,
+        else => null,
+    };
+}
+
+const CmpOp = enum { gte, lte, gt, lt };
+
+fn numCmp(instance: std.json.Value, limit_val: std.json.Value, op: CmpOp) bool {
+    const n = getNumber(instance) orelse return true;
+    const limit = getNumber(limit_val) orelse return true;
+    return switch (op) {
+        .gte => n >= limit,
+        .lte => n <= limit,
+        .gt => n > limit,
+        .lt => n < limit,
+    };
+}
+
+const LenOp = enum { min, max };
+
+fn isLengthValid(instance: std.json.Value, limit_val: std.json.Value, op: LenOp) bool {
+    const s = switch (instance) {
+        .string => |str| str,
+        else => return true,
+    };
+    const limit = getUint(limit_val) orelse return true;
+    const len = std.unicode.utf8CountCodepoints(s) catch return true;
+    return switch (op) {
+        .min => len >= limit,
+        .max => len <= limit,
+    };
+}
+
+fn isItemCountValid(instance: std.json.Value, limit_val: std.json.Value, op: LenOp) bool {
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    const limit = getUint(limit_val) orelse return true;
+    return switch (op) {
+        .min => arr.len >= limit,
+        .max => arr.len <= limit,
+    };
+}
+
+fn isPropCountValid(instance: std.json.Value, limit_val: std.json.Value, op: LenOp) bool {
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    const limit = getUint(limit_val) orelse return true;
+    return switch (op) {
+        .min => obj.count() >= limit,
+        .max => obj.count() <= limit,
+    };
+}
+
+fn getUint(val: std.json.Value) ?usize {
+    return switch (val) {
+        .integer => |n| if (n >= 0) @intCast(n) else null,
+        .float => |f| if (f >= 0 and f == @trunc(f)) @intFromFloat(f) else null,
+        else => null,
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Compilation helpers

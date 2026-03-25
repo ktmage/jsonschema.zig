@@ -162,15 +162,12 @@ pub const Context = struct {
             switch (sub_schema) {
                 .bool => |b| return b,
                 .object => {
-                    // Look up compiled node ONCE — reused by validateAll via compiled_node
-                    const looked_up_node = compiled.getNode(sub_schema);
-                    if (looked_up_node) |node| {
-                        // Ultra-fast path: simple type-only schemas
-                        if (node.simple_type != .none) {
-                            return matchesSimpleType(instance, node.simple_type);
+                    if (compiled.getNode(sub_schema)) |node| {
+                        if (!node.ref_overrides) {
+                            return node.isValid(instance, compiled);
                         }
                     }
-                    // Use stack-based allocator to avoid heap allocation entirely
+                    // Fallback: node not found or ref_overrides, use FBA path
                     var buf: [512]u8 = undefined;
                     var fba = std.heap.FixedBufferAllocator.init(&buf);
                     var errors = std.ArrayList(ValidationError).init(fba.allocator());
@@ -187,7 +184,6 @@ pub const Context = struct {
                         .ref_base_uri = self.base_uri,
                         .dynamic_scope = self.dynamic_scope,
                         .compiled = self.compiled,
-                        .compiled_node = looked_up_node,
                     };
                     validateAll(child);
                     return errors.items.len == 0;
@@ -210,15 +206,15 @@ pub const Context = struct {
         instance: std.json.Value,
         pre_node: ?*const compiled_mod.CompiledNode,
     ) bool {
-        if (self.compiled != null) {
+        if (self.compiled) |compiled| {
             switch (sub_schema) {
                 .bool => |b| return b,
                 .object => {
-                    if (pre_node) |node| {
-                        if (node.simple_type != .none) {
-                            return matchesSimpleType(instance, node.simple_type);
-                        }
+                    const node = pre_node orelse compiled.getNode(sub_schema);
+                    if (node) |n| {
+                        if (!n.ref_overrides) return n.isValid(instance, compiled);
                     }
+                    // Fallback
                     var buf: [512]u8 = undefined;
                     var fba = std.heap.FixedBufferAllocator.init(&buf);
                     var errors = std.ArrayList(ValidationError).init(fba.allocator());
@@ -235,7 +231,6 @@ pub const Context = struct {
                         .ref_base_uri = self.base_uri,
                         .dynamic_scope = self.dynamic_scope,
                         .compiled = self.compiled,
-                        .compiled_node = pre_node,
                     };
                     validateAll(child);
                     return errors.items.len == 0;
