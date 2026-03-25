@@ -81,6 +81,24 @@ pub const Context = struct {
                     }
                 },
                 .object => {
+                    // Ultra-fast: simple type-only schemas (e.g. {"type": "string"})
+                    if (self.compiled.?.getNode(sub_schema)) |node| {
+                        if (node.simple_type != .none) {
+                            if (matchesSimpleType(instance, node.simple_type)) {
+                                return .{ .errors = &.{}, .allocator = self.allocator };
+                            } else {
+                                const err = jsonschema.ValidationError{
+                                    .instance_path = self.allocator.dupe(u8, instance_path) catch "",
+                                    .schema_path = self.allocator.dupe(u8, schema_path) catch "",
+                                    .keyword = "type",
+                                    .message = self.allocator.dupe(u8, "Instance does not match the expected type") catch "",
+                                };
+                                const errs = self.allocator.alloc(jsonschema.ValidationError, 1) catch return .{ .errors = &.{}, .allocator = self.allocator };
+                                errs[0] = err;
+                                return .{ .errors = errs, .allocator = self.allocator };
+                            }
+                        }
+                    }
                     var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
                     const child = Context{
                         .allocator = self.allocator,
