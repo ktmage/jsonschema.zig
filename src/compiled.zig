@@ -253,13 +253,21 @@ fn recurseIntoSubSchemas(
 
 /// Check if a schema object is simply {"type": "xxx"} with no other keywords.
 fn detectSimpleType(obj: std.json.ObjectMap) SimpleType {
-    // Must have exactly 1 key which is "type"
-    if (obj.count() != 1) return .none;
     const type_val = obj.get("type") orelse return .none;
     const type_str = switch (type_val) {
         .string => |s| s,
         else => return .none,
     };
+
+    // Check that all other keys are annotations (no validation keywords besides "type")
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        if (std.mem.eql(u8, k, "type")) continue;
+        if (isAnnotationOnly(k)) continue;
+        return .none; // has a validation keyword other than type
+    }
+
     if (std.mem.eql(u8, type_str, "null")) return .null;
     if (std.mem.eql(u8, type_str, "boolean")) return .boolean;
     if (std.mem.eql(u8, type_str, "integer")) return .integer;
@@ -268,6 +276,19 @@ fn detectSimpleType(obj: std.json.ObjectMap) SimpleType {
     if (std.mem.eql(u8, type_str, "array")) return .array;
     if (std.mem.eql(u8, type_str, "object")) return .object;
     return .none;
+}
+
+fn isAnnotationOnly(key: []const u8) bool {
+    const annotations = [_][]const u8{
+        "description", "title",    "$comment", "default",
+        "examples",    "format",   "$id",      "$schema",
+        "readOnly",    "writeOnly", "$anchor", "$defs",
+        "definitions", "deprecated",
+    };
+    for (annotations) |a| {
+        if (std.mem.eql(u8, key, a)) return true;
+    }
+    return false;
 }
 
 fn getSchemaId(schema: std.json.Value) []const u8 {
