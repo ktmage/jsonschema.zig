@@ -50,15 +50,13 @@ pub fn validate(ctx: Context) void {
         switch (items_value) {
             // Single schema: all items must match
             .object, .bool => {
-                const items_path = json_pointer.appendProperty(ctx.allocator, ctx.schema_path, "items");
                 for (arr.items, 0..) |item, i| {
+                    // Fast path: skip path allocation for valid items
+                    if (ctx.compiled != null and ctx.isSubschemaValid(items_value, item)) continue;
+
+                    const items_path = json_pointer.appendProperty(ctx.allocator, ctx.schema_path, "items");
                     const item_path = json_pointer.appendIndex(ctx.allocator, ctx.instance_path, i);
-                    const result = ctx.validateSubschema(
-                        items_value,
-                        item,
-                        item_path,
-                        items_path,
-                    );
+                    const result = ctx.validateSubschema(items_value, item, item_path, items_path);
                     defer result.deinit();
                     if (!result.isValid()) {
                         for (result.errors) |err| {
