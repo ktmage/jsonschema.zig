@@ -83,16 +83,10 @@ pub const Context = struct {
                         return .{ .errors = errors, .allocator = self.allocator };
                     }
                 },
-                .object => |obj| {
-                    // If the sub-schema has $id or $ref, fall through to
-                    // validateFull which handles base URI resolution properly.
-                    if (obj.get("$id") != null or obj.get("$ref") != null) {
-                        // Fall through to slow path below
-                    } else {
-                        // Look up compiled node ONCE — reused by validateAll via compiled_node
-                        const looked_up_node = compiled.getNode(sub_schema);
-                        if (looked_up_node) |node| {
-                            // Ultra-fast: simple type-only schemas (e.g. {"type": "string"})
+                .object => {
+                    const looked_up_node = compiled.getNode(sub_schema);
+                    if (looked_up_node) |node| {
+                        if (!node.needs_uri_resolution) {
                             if (node.simple_type != .none) {
                                 if (matchesSimpleType(instance, node.simple_type)) {
                                     return .{ .errors = &.{}, .allocator = self.allocator };
@@ -108,31 +102,33 @@ pub const Context = struct {
                                     return .{ .errors = errs, .allocator = self.allocator };
                                 }
                             }
+                            // Non-simple, non-URI: use compiled dispatch
+                            var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                            const child = Context{
+                                .allocator = self.allocator,
+                                .root_schema = self.root_schema,
+                                .schema = sub_schema,
+                                .instance = instance,
+                                .instance_path = instance_path,
+                                .schema_path = schema_path,
+                                .errors = &errors,
+                                .registry = self.registry,
+                                .base_uri = self.base_uri,
+                                .ref_base_uri = self.base_uri,
+                                .dynamic_scope = self.dynamic_scope,
+                                .compiled = self.compiled,
+                                .compiled_node = node,
+                            };
+                            validateAll(child);
+                            if (errors.items.len == 0) {
+                                return .{ .errors = &.{}, .allocator = self.allocator };
+                            }
+                            return .{
+                                .errors = errors.toOwnedSlice() catch &.{},
+                                .allocator = self.allocator,
+                            };
                         }
-                        var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
-                        const child = Context{
-                            .allocator = self.allocator,
-                            .root_schema = self.root_schema,
-                            .schema = sub_schema,
-                            .instance = instance,
-                            .instance_path = instance_path,
-                            .schema_path = schema_path,
-                            .errors = &errors,
-                            .registry = self.registry,
-                            .base_uri = self.base_uri,
-                            .ref_base_uri = self.base_uri,
-                            .dynamic_scope = self.dynamic_scope,
-                            .compiled = self.compiled,
-                            .compiled_node = looked_up_node,
-                        };
-                        validateAll(child);
-                        if (errors.items.len == 0) {
-                            return .{ .errors = &.{}, .allocator = self.allocator };
-                        }
-                        return .{
-                            .errors = errors.toOwnedSlice() catch &.{},
-                            .allocator = self.allocator,
-                        };
+                        // needs_uri_resolution — fall through to slow path
                     }
                 },
                 else => {
@@ -167,17 +163,12 @@ pub const Context = struct {
         if (self.compiled) |compiled| {
             switch (sub_schema) {
                 .bool => |b| return b,
-                .object => |obj| {
-                    // If the sub-schema has $id or $ref, fall through to
-                    // validateFull which handles base URI resolution properly.
-                    if (obj.get("$id") == null and obj.get("$ref") == null) {
-                        if (compiled.getNode(sub_schema)) |node| {
+                .object => {
+                    if (compiled.getNode(sub_schema)) |node| {
+                        if (!node.needs_uri_resolution) {
                             if (node.isValidFast(instance, compiled)) |result| return result;
                         }
                     }
-                    // Fall through to slow path — either because $id/$ref
-                    // requires proper URI resolution, or because isValidFast
-                    // returned null (can't inline all keywords).
                 },
                 else => return true,
             }
@@ -200,8 +191,6 @@ pub const Context = struct {
         return result.isValid();
     }
 
-    /// Like isSubschemaValid, but accepts a pre-looked-up CompiledNode to avoid
-    /// redundant hashmap lookups when the caller has already done getNode().
     pub fn isSubschemaValidWithNode(
         self: Context,
         sub_schema: std.json.Value,
@@ -211,21 +200,17 @@ pub const Context = struct {
         if (self.compiled) |compiled| {
             switch (sub_schema) {
                 .bool => |b| return b,
-                .object => |obj| {
-                    // If the sub-schema has $id or $ref, fall through to
-                    // validateFull which handles base URI resolution properly.
-                    if (obj.get("$id") == null and obj.get("$ref") == null) {
-                        const node = pre_node orelse compiled.getNode(sub_schema);
-                        if (node) |n| {
+                .object => {
+                    const node = pre_node orelse compiled.getNode(sub_schema);
+                    if (node) |n| {
+                        if (!n.needs_uri_resolution) {
                             if (n.isValidFast(instance, compiled)) |result| return result;
                         }
                     }
-                    // Fall through to slow path
                 },
                 else => return true,
             }
         }
-        // Slow path: full validation with proper URI resolution
         const result = jsonschema.validateFull(
             self.allocator,
             self.root_schema,

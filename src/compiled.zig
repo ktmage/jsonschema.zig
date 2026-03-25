@@ -104,6 +104,8 @@ pub const CompiledNode = struct {
     /// If this schema is simply {"type": "xxx"}, store the type tag for
     /// ultra-fast validation without going through the full validator dispatch.
     simple_type: SimpleType = .none,
+    /// True if this schema has $id or $ref — needs slow path for URI resolution.
+    needs_uri_resolution: bool = false,
 
     pub const ValidatorEntry = struct {
         func: Validator.KeywordValidator,
@@ -512,11 +514,13 @@ fn compileNode(
             // Detect simple type-only schemas: {"type": "xxx"}
             const simple_type = detectSimpleType(obj);
 
+            const needs_uri = obj.get("$id") != null or obj.get("$ref") != null;
             const node = alloc.create(CompiledNode) catch return;
             node.* = .{
                 .entries = entries.toOwnedSlice() catch &.{},
                 .ref_overrides = ref_overrides,
                 .simple_type = simple_type,
+                .needs_uri_resolution = needs_uri,
             };
             node_map.put(key, node) catch return;
 
