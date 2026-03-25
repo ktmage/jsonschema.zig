@@ -81,21 +81,6 @@ if (result.isValid()) {
 }
 ```
 
-## Bowtie
-
-This implementation includes a [Bowtie](https://bowtie.report/) harness for standardized testing:
-
-```bash
-# Build the harness
-zig build
-
-# Test locally
-echo '{"cmd":"start","version":1}' | ./zig-out/bin/bowtie-zig-jsonschema
-
-# Docker
-docker build -t zig-jsonschema .
-```
-
 ## License
 
 MIT
