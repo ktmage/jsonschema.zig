@@ -3,7 +3,27 @@ const Allocator = std.mem.Allocator;
 const jsonschema = @import("main.zig");
 const ValidationError = jsonschema.ValidationError;
 const JsonPointer = jsonschema.JsonPointer;
-const CompiledSchema = @import("compiled.zig").CompiledSchema;
+const compiled_mod = @import("compiled.zig");
+const CompiledSchema = compiled_mod.CompiledSchema;
+const SimpleType = compiled_mod.SimpleType;
+
+/// Fast inline type check without going through the full validator dispatch.
+fn matchesSimpleType(instance: std.json.Value, simple_type: SimpleType) bool {
+    return switch (simple_type) {
+        .none => true,
+        .null => instance == .null,
+        .boolean => instance == .bool,
+        .integer => switch (instance) {
+            .integer => true,
+            .float => |f| @floor(f) == f and !std.math.isNan(f) and !std.math.isInf(f),
+            else => false,
+        },
+        .number => instance == .integer or instance == .float,
+        .string => instance == .string,
+        .array => instance == .array,
+        .object => instance == .object,
+    };
+}
 
 /// Dynamic scope entry: tracks which schema resource is being evaluated
 pub const DynamicScopeEntry = struct {
@@ -75,6 +95,9 @@ pub const Context = struct {
                         .compiled = self.compiled,
                     };
                     validateAll(child);
+                    if (errors.items.len == 0) {
+                        return .{ .errors = &.{}, .allocator = self.allocator };
+                    }
                     return .{
                         .errors = errors.toOwnedSlice() catch &.{},
                         .allocator = self.allocator,
@@ -109,10 +132,16 @@ pub const Context = struct {
         instance: std.json.Value,
     ) bool {
         // Fast path: compiled schemas
-        if (self.compiled != null) {
+        if (self.compiled) |compiled| {
             switch (sub_schema) {
                 .bool => |b| return b,
                 .object => {
+                    // Ultra-fast path: simple type-only schemas
+                    if (compiled.getNode(sub_schema)) |node| {
+                        if (node.simple_type != .none) {
+                            return matchesSimpleType(instance, node.simple_type);
+                        }
+                    }
                     // Use a sentinel error list that just tracks "has any error"
                     var errors = std.ArrayList(ValidationError).init(self.allocator);
                     const child = Context{
@@ -281,6 +310,13 @@ pub fn validateAll(ctx: Context) void {
         if (compiled.getNode(ctx.schema)) |node| {
             if (node.ref_overrides) {
                 @import("keywords/ref.zig").validate(ctx);
+                return;
+            }
+            // Ultra-fast path: simple type-only schemas like {"type": "number"}
+            if (node.simple_type != .none) {
+                if (!matchesSimpleType(ctx.instance, node.simple_type)) {
+                    ctx.addError("type", "Instance does not match the expected type");
+                }
                 return;
             }
             for (node.validators) |validator_fn| {

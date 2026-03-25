@@ -48,7 +48,52 @@ pub fn validateCompiled(
     compiled: *const CompiledSchema,
     instance: std.json.Value,
 ) ValidationResult {
-    return validateFull(allocator, compiled.schema, compiled.schema, instance, "", "", null, "", null, compiled);
+    const schema = compiled.schema;
+
+    // Handle boolean schemas directly
+    switch (schema) {
+        .bool => |b| {
+            if (b) {
+                return .{ .errors = &.{}, .allocator = allocator };
+            } else {
+                return makeSingleError(allocator, "", "", "false schema", "Schema is false — all values are rejected");
+            }
+        },
+        .object => {},
+        else => {
+            return .{ .errors = &.{}, .allocator = allocator };
+        },
+    }
+
+    // Fast path: skip isDraft2020, $id resolution, registry checks, dynamic scope
+    var errors = std.ArrayList(ValidationError).init(allocator);
+
+    const ctx = Validator.Context{
+        .allocator = allocator,
+        .root_schema = schema,
+        .schema = schema,
+        .instance = instance,
+        .instance_path = "",
+        .schema_path = "",
+        .errors = &errors,
+        .registry = null,
+        .base_uri = "",
+        .ref_base_uri = "",
+        .dynamic_scope = null,
+        .compiled = compiled,
+    };
+
+    Validator.validateAll(ctx);
+
+    // Fast path: no errors means no allocation needed for the result
+    if (errors.items.len == 0) {
+        return .{ .errors = &.{}, .allocator = allocator };
+    }
+
+    return .{
+        .errors = errors.toOwnedSlice() catch &.{},
+        .allocator = allocator,
+    };
 }
 
 /// Validate an instance against a pre-compiled schema with a registry.

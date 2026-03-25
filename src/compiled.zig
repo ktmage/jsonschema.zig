@@ -80,6 +80,18 @@ pub const CompiledSchema = struct {
     }
 };
 
+/// Compact type tag for fast type-only validation.
+pub const SimpleType = enum(u8) {
+    none = 0, // not a simple type-only schema
+    null,
+    boolean,
+    integer,
+    number,
+    string,
+    array,
+    object,
+};
+
 /// A pre-compiled schema node.  Stores only the keyword validators that are
 /// actually present in the original schema object, avoiding the need to probe
 /// the hashmap for all 30+ keywords at validation time.
@@ -89,6 +101,9 @@ pub const CompiledNode = struct {
     /// True if this node has $ref AND the schema is Draft 7 (not 2020-12),
     /// meaning $ref overrides all sibling keywords.
     ref_overrides: bool,
+    /// If this schema is simply {"type": "xxx"}, store the type tag for
+    /// ultra-fast validation without going through the full validator dispatch.
+    simple_type: SimpleType = .none,
 };
 
 // ---------------------------------------------------------------------------
@@ -134,10 +149,14 @@ fn compileNode(
             // call ref.validate directly anyway.  But we still record the node
             // so the lookup succeeds (and ref_overrides flag is set).
 
+            // Detect simple type-only schemas: {"type": "xxx"}
+            const simple_type = detectSimpleType(obj);
+
             const node = alloc.create(CompiledNode) catch return;
             node.* = .{
                 .validators = validators.toOwnedSlice() catch &.{},
                 .ref_overrides = ref_overrides,
+                .simple_type = simple_type,
             };
             node_map.put(key, node) catch return;
 
@@ -226,6 +245,25 @@ fn recurseIntoSubSchemas(
             else => {}, // already handled as single schema above
         }
     }
+}
+
+/// Check if a schema object is simply {"type": "xxx"} with no other keywords.
+fn detectSimpleType(obj: std.json.ObjectMap) SimpleType {
+    // Must have exactly 1 key which is "type"
+    if (obj.count() != 1) return .none;
+    const type_val = obj.get("type") orelse return .none;
+    const type_str = switch (type_val) {
+        .string => |s| s,
+        else => return .none,
+    };
+    if (std.mem.eql(u8, type_str, "null")) return .null;
+    if (std.mem.eql(u8, type_str, "boolean")) return .boolean;
+    if (std.mem.eql(u8, type_str, "integer")) return .integer;
+    if (std.mem.eql(u8, type_str, "number")) return .number;
+    if (std.mem.eql(u8, type_str, "string")) return .string;
+    if (std.mem.eql(u8, type_str, "array")) return .array;
+    if (std.mem.eql(u8, type_str, "object")) return .object;
+    return .none;
 }
 
 fn getSchemaId(schema: std.json.Value) []const u8 {
