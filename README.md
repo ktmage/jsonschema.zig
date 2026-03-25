@@ -38,6 +38,29 @@ zig build test
 
 The test suite is fetched automatically as a lazy dependency on first run.
 
+## Installation
+
+Add to your `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .jsonschema = .{
+        .url = "https://github.com/ktmage/jsonschema.zig/archive/refs/tags/v0.1.0.tar.gz",
+        .hash = "HASH", // run `zig fetch <url>` to get this
+    },
+},
+```
+
+Then in your `build.zig`:
+
+```zig
+const jsonschema_dep = b.dependency("jsonschema", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("jsonschema", jsonschema_dep.module("jsonschema"));
+```
+
 ## Usage
 
 ```zig
