@@ -101,6 +101,47 @@ pub const Context = struct {
         );
     }
 
+    /// Check if a sub-schema validates without collecting errors.
+    /// Much faster than validateSubschema when you only need a boolean result.
+    pub fn isSubschemaValid(
+        self: Context,
+        sub_schema: std.json.Value,
+        instance: std.json.Value,
+    ) bool {
+        // Fast path: compiled schemas
+        if (self.compiled != null) {
+            switch (sub_schema) {
+                .bool => |b| return b,
+                .object => {
+                    // Use a sentinel error list that just tracks "has any error"
+                    var errors = std.ArrayList(ValidationError).init(self.allocator);
+                    const child = Context{
+                        .allocator = self.allocator,
+                        .root_schema = self.root_schema,
+                        .schema = sub_schema,
+                        .instance = instance,
+                        .instance_path = "",
+                        .schema_path = "",
+                        .errors = &errors,
+                        .registry = self.registry,
+                        .base_uri = self.base_uri,
+                        .ref_base_uri = self.base_uri,
+                        .dynamic_scope = self.dynamic_scope,
+                        .compiled = self.compiled,
+                    };
+                    validateAll(child);
+                    return errors.items.len == 0;
+                },
+                else => return true,
+            }
+        }
+
+        // Slow path: use validateSubschema
+        const result = self.validateSubschema(sub_schema, instance, "", "");
+        defer result.deinit();
+        return result.isValid();
+    }
+
     /// Add a validation error to the error list.
     pub fn addError(self: Context, keyword: []const u8, message: []const u8) void {
         const schema_p = JsonPointer.appendProperty(self.allocator, self.schema_path, keyword);

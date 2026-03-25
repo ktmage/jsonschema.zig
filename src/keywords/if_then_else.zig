@@ -7,12 +7,8 @@ pub fn validate(ctx: Context) void {
     const schema_obj = ctx.schema.object;
     const if_schema = schema_obj.get("if") orelse return;
 
-    // Validate instance against the "if" schema silently
-    const if_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "if");
-    const if_result = ctx.validateSubschema(if_schema, ctx.instance, ctx.instance_path, if_path);
-    defer if_result.deinit();
-
-    if (if_result.isValid()) {
+    // Validate instance against the "if" schema silently (only need bool result)
+    if (ctx.isSubschemaValid(if_schema, ctx.instance)) {
         // "if" passed — validate against "then" if it exists
         const then_schema = schema_obj.get("then") orelse return;
         const then_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "then");

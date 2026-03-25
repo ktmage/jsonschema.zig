@@ -249,9 +249,7 @@ fn addAllProperties(instance: std.json.Value, evaluated: *std.StringHashMap(void
 }
 
 fn subschemaValid(ctx: Context, sub_schema: std.json.Value, instance: std.json.Value) bool {
-    const result = ctx.validateSubschema(sub_schema, instance, ctx.instance_path, ctx.schema_path);
-    defer result.deinit();
-    return result.isValid();
+    return ctx.isSubschemaValid(sub_schema, instance);
 }
 
 fn resolveRef(ctx: Context, ref_str: []const u8) ?std.json.Value {

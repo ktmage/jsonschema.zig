@@ -120,17 +120,13 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    const base_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "oneOf");
     var match_count: usize = 0;
 
-    for (sub_schemas, 0..) |sub_schema, i| {
+    for (sub_schemas) |sub_schema| {
         // Quick pre-check: skip sub-schemas that can't possibly match
         if (!couldMatch(sub_schema, ctx.instance)) continue;
 
-        const path = JsonPointer.appendIndex(ctx.allocator, base_path, i);
-        const result = ctx.validateSubschema(sub_schema, ctx.instance, ctx.instance_path, path);
-        defer result.deinit();
-        if (result.isValid()) {
+        if (ctx.isSubschemaValid(sub_schema, ctx.instance)) {
             match_count += 1;
             if (match_count > 1) break;
         }

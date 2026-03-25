@@ -12,20 +12,10 @@ pub fn validate(ctx: Context) void {
         else => return, // non-arrays pass
     };
 
-    const contains_path = json_pointer.appendProperty(ctx.allocator, ctx.schema_path, "contains");
-
     // Count how many items match
     var match_count: usize = 0;
-    for (arr.items, 0..) |item, i| {
-        const item_path = json_pointer.appendIndex(ctx.allocator, ctx.instance_path, i);
-        const result = ctx.validateSubschema(
-            contains_schema,
-            item,
-            item_path,
-            contains_path,
-        );
-        defer result.deinit();
-        if (result.isValid()) {
+    for (arr.items) |item| {
+        if (ctx.isSubschemaValid(contains_schema, item)) {
             match_count += 1;
         }
     }
