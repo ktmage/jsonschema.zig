@@ -23,13 +23,12 @@ pub fn validate(ctx: Context) void {
 
         const instance_value = instance_obj.get(prop_name) orelse continue;
 
-        // Ultra-fast: look up compiled node ONCE and use for both
-        // simple type check and isSubschemaValid (avoids redundant hashmap lookups)
+        // Fast path: try zero-allocation isValidFast, fall back to isSubschemaValid
         if (ctx.compiled) |c| {
             const looked_up_node = c.getNode(prop_schema);
             if (looked_up_node) |node| {
-                if (node.simple_type != .none) {
-                    if (validator.matchesSimpleType(instance_value, node.simple_type)) continue;
+                if (node.isValidFast(instance_value, c)) |fast_result| {
+                    if (fast_result) continue;
                     // Invalid — fall through to slow path for error details
                 } else {
                     if (ctx.isSubschemaValidWithNode(prop_schema, instance_value, looked_up_node)) continue;

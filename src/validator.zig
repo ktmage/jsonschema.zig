@@ -163,11 +163,9 @@ pub const Context = struct {
                 .bool => |b| return b,
                 .object => {
                     if (compiled.getNode(sub_schema)) |node| {
-                        if (!node.ref_overrides) {
-                            return node.isValid(instance, compiled);
-                        }
+                        if (node.isValidFast(instance, compiled)) |result| return result;
                     }
-                    // Fallback: node not found or ref_overrides, use FBA path
+                    // Fallback: can't inline or node not found, use FBA path
                     var buf: [512]u8 = undefined;
                     var fba = std.heap.FixedBufferAllocator.init(&buf);
                     var errors = std.ArrayList(ValidationError).init(fba.allocator());
@@ -212,7 +210,7 @@ pub const Context = struct {
                 .object => {
                     const node = pre_node orelse compiled.getNode(sub_schema);
                     if (node) |n| {
-                        if (!n.ref_overrides) return n.isValid(instance, compiled);
+                        if (n.isValidFast(instance, compiled)) |result| return result;
                     }
                     // Fallback
                     var buf: [512]u8 = undefined;

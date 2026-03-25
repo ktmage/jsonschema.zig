@@ -113,18 +113,16 @@ pub const CompiledNode = struct {
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
     /// Returns false on first failure. Only works for common keyword patterns;
     /// falls back to full validation for complex keywords.
-    pub fn isValid(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) bool {
+    /// Fast boolean-only validation. Returns null if this node has keywords
+    /// that can't be inlined (caller must use FBA fallback).
+    pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
         if (self.simple_type != .none) {
             return Validator.matchesSimpleType(instance, self.simple_type);
         }
-        if (self.ref_overrides) {
-            // $ref override — need full validation path, can't inline
-            // Return null-like signal... but we return bool.
-            // Use FBA fallback in caller instead.
-            unreachable; // caller should check ref_overrides before calling isValid
-        }
+        if (self.ref_overrides) return null; // can't inline $ref
         for (self.entries) |entry| {
-            if (!isEntryValid(entry, instance, compiled)) return false;
+            const result = isEntryValid(entry, instance, compiled) orelse return null;
+            if (!result) return false;
         }
         return true;
     }
@@ -132,7 +130,7 @@ pub const CompiledNode = struct {
 
 /// Check if a single keyword entry is valid for an instance.
 /// Inlines common validators to avoid function pointer overhead.
-fn isEntryValid(entry: CompiledNode.ValidatorEntry, instance: std.json.Value, compiled: *const CompiledSchema) bool {
+fn isEntryValid(entry: CompiledNode.ValidatorEntry, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     const kv = entry.keyword_value;
     const func = entry.func;
 
@@ -180,12 +178,11 @@ fn isEntryValid(entry: CompiledNode.ValidatorEntry, instance: std.json.Value, co
         return isItemsValid(instance, kv, compiled);
     }
     if (func == @import("keywords/additional_properties.zig").validate) {
-        // Too complex to inline — conservative true
-        return true;
+        return null; // too complex to inline
     }
 
-    // Unknown keyword — conservative true (let full validation handle it)
-    return true;
+    // Unknown keyword — can't inline, signal caller to use full path
+    return null;
 }
 
 fn isTypeValid(type_val: std.json.Value, instance: std.json.Value) bool {
@@ -237,7 +234,7 @@ fn isRequiredValid(req_val: std.json.Value, instance: std.json.Value) bool {
     return true;
 }
 
-fn isPropertiesValid(props_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) bool {
+fn isPropertiesValid(props_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     const props = switch (props_val) {
         .object => |o| o,
         else => return true,
@@ -252,14 +249,14 @@ fn isPropertiesValid(props_val: std.json.Value, instance: std.json.Value, compil
         const prop_schema = entry.value_ptr.*;
         // Try compiled node for sub-schema
         if (compiled.getNode(prop_schema)) |node| {
-            if (!node.isValid(inst_val, compiled)) return false;
+            if (node.isValidFast(inst_val, compiled)) |r| { if (!r) return false; } else return null;
         }
         // If no compiled node, conservatively return true
     }
     return true;
 }
 
-fn isItemsValid(instance: std.json.Value, items_val: std.json.Value, compiled: *const CompiledSchema) bool {
+fn isItemsValid(instance: std.json.Value, items_val: std.json.Value, compiled: *const CompiledSchema) ?bool {
     const arr = switch (instance) {
         .array => |a| a.items,
         else => return true,
@@ -268,7 +265,7 @@ fn isItemsValid(instance: std.json.Value, items_val: std.json.Value, compiled: *
         .object => {
             if (compiled.getNode(items_val)) |node| {
                 for (arr) |item| {
-                    if (!node.isValid(item, compiled)) return false;
+                    if (node.isValidFast(item, compiled)) |r| { if (!r) return false; } else return null;
                 }
             }
             return true;
