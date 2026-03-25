@@ -46,6 +46,7 @@ pub fn validate(ctx: Context) void {
                             ctx.registry,
                             scope_entry.base_uri,
                             ctx.dynamic_scope,
+                            ctx.compiled,
                         );
                         defer result.deinit();
                         appendErrors(ctx, result);
@@ -73,6 +74,7 @@ pub fn validate(ctx: Context) void {
                                         ctx.registry,
                                         scope_entry.base_uri,
                                         ctx.dynamic_scope,
+                                        ctx.compiled,
                                     );
                                     defer result.deinit();
                                     appendErrors(ctx, result);
@@ -97,6 +99,7 @@ pub fn validate(ctx: Context) void {
         ctx.registry,
         initial.base_uri,
         ctx.dynamic_scope,
+        ctx.compiled,
     );
     defer result.deinit();
     appendErrors(ctx, result);

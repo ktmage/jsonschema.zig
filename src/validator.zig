@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const jsonschema = @import("main.zig");
 const ValidationError = jsonschema.ValidationError;
 const JsonPointer = jsonschema.JsonPointer;
+const CompiledSchema = @import("compiled.zig").CompiledSchema;
 
 /// Dynamic scope entry: tracks which schema resource is being evaluated
 pub const DynamicScopeEntry = struct {
@@ -26,6 +27,8 @@ pub const Context = struct {
     ref_base_uri: []const u8 = "",
     /// Dynamic scope stack for $dynamicRef resolution
     dynamic_scope: ?*std.ArrayList(DynamicScopeEntry) = null,
+    /// Pre-compiled schema for fast dispatch (null = use legacy path).
+    compiled: ?*const CompiledSchema = null,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -45,6 +48,7 @@ pub const Context = struct {
             self.registry,
             self.base_uri,
             self.dynamic_scope,
+            self.compiled,
         );
     }
 
@@ -67,7 +71,7 @@ pub const KeywordValidator = *const fn (ctx: Context) void;
 /// Each keyword maps to a validation function.
 /// To add a new keyword, add an entry to this table and create the
 /// corresponding file in src/keywords/.
-const keyword_table = .{
+pub const keyword_table = .{
     // Type checking
     .{ "type", @import("keywords/type_keyword.zig").validate },
     .{ "enum", @import("keywords/enum_keyword.zig").validate },
@@ -142,7 +146,7 @@ const validation_keywords = [_][]const u8{
     "dependentRequired",
 };
 
-fn isValidationKeyword(name: []const u8) bool {
+pub fn isValidationKeyword(name: []const u8) bool {
     @setEvalBranchQuota(10000);
     for (validation_keywords) |vk| {
         if (std.mem.eql(u8, name, vk)) return true;
@@ -182,6 +186,21 @@ fn isValidationVocabDisabled(ctx: Context) bool {
 
 /// Run all applicable keyword validators against the schema/instance pair.
 pub fn validateAll(ctx: Context) void {
+    // Fast path: use pre-compiled node if available
+    if (ctx.compiled) |compiled| {
+        if (compiled.getNode(ctx.schema)) |node| {
+            if (node.ref_overrides) {
+                @import("keywords/ref.zig").validate(ctx);
+                return;
+            }
+            for (node.validators) |validator_fn| {
+                validator_fn(ctx);
+            }
+            return;
+        }
+        // Fall through to legacy path if node not found (e.g. dynamically resolved schema)
+    }
+
     const schema_obj = ctx.schema.object;
 
     // Draft 7: $ref overrides all sibling keywords

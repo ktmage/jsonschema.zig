@@ -5,6 +5,8 @@ pub const JsonPointer = @import("json_pointer.zig");
 pub const Validator = @import("validator.zig");
 pub const SchemaRegistry = @import("schema_registry.zig").SchemaRegistry;
 const schema_registry_mod = @import("schema_registry.zig");
+pub const compiled_mod = @import("compiled.zig");
+pub const CompiledSchema = compiled_mod.CompiledSchema;
 
 pub const ValidationError = struct {
     instance_path: []const u8,
@@ -36,7 +38,41 @@ pub fn validate(
     schema: std.json.Value,
     instance: std.json.Value,
 ) ValidationResult {
-    return validateFull(allocator, schema, schema, instance, "", "", null, "", null);
+    return validateFull(allocator, schema, schema, instance, "", "", null, "", null, null);
+}
+
+/// Validate an instance against a pre-compiled schema.
+/// This is the fast path for repeated validation against the same schema.
+pub fn validateCompiled(
+    allocator: Allocator,
+    compiled: *const CompiledSchema,
+    instance: std.json.Value,
+) ValidationResult {
+    return validateFull(allocator, compiled.schema, compiled.schema, instance, "", "", null, "", null, compiled);
+}
+
+/// Validate an instance against a pre-compiled schema with a registry.
+pub fn validateCompiledWithRegistry(
+    allocator: Allocator,
+    compiled: *const CompiledSchema,
+    instance: std.json.Value,
+    registry: *SchemaRegistry,
+) ValidationResult {
+    var dynamic_scope = std.ArrayList(Validator.DynamicScopeEntry).init(allocator);
+    defer dynamic_scope.deinit();
+    const root_base = blk: {
+        const obj = switch (compiled.schema) {
+            .object => |o| o,
+            else => break :blk @as([]const u8, ""),
+        };
+        const id_val = obj.get("$id") orelse break :blk @as([]const u8, "");
+        break :blk switch (id_val) {
+            .string => |s| s,
+            else => @as([]const u8, ""),
+        };
+    };
+    dynamic_scope.append(.{ .base_uri = root_base, .schema = compiled.schema }) catch {};
+    return validateFull(allocator, compiled.schema, compiled.schema, instance, "", "", registry, "", &dynamic_scope, compiled);
 }
 
 pub fn validateWithRegistry(
@@ -61,7 +97,7 @@ pub fn validateWithRegistry(
         };
     };
     dynamic_scope.append(.{ .base_uri = root_base, .schema = schema }) catch {};
-    return validateFull(allocator, schema, schema, instance, "", "", registry, "", &dynamic_scope);
+    return validateFull(allocator, schema, schema, instance, "", "", registry, "", &dynamic_scope, null);
 }
 
 pub fn validateWithPath(
@@ -72,7 +108,7 @@ pub fn validateWithPath(
     instance_path: []const u8,
     schema_path: []const u8,
 ) ValidationResult {
-    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, null, "", null);
+    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, null, "", null, null);
 }
 
 pub fn validateWithContext(
@@ -84,7 +120,7 @@ pub fn validateWithContext(
     schema_path: []const u8,
     registry: ?*SchemaRegistry,
 ) ValidationResult {
-    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, registry, "", null);
+    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, registry, "", null, null);
 }
 
 pub fn validateFull(
@@ -97,6 +133,7 @@ pub fn validateFull(
     registry: ?*SchemaRegistry,
     parent_base_uri: []const u8,
     dynamic_scope: ?*std.ArrayList(Validator.DynamicScopeEntry),
+    compiled: ?*const CompiledSchema,
 ) ValidationResult {
     switch (schema) {
         .bool => |b| {
@@ -175,6 +212,7 @@ pub fn validateFull(
         .base_uri = base_uri,
         .ref_base_uri = ref_base_uri,
         .dynamic_scope = dynamic_scope,
+        .compiled = compiled,
     };
 
     Validator.validateAll(ctx);
@@ -226,4 +264,5 @@ fn makeSingleError(
 test {
     _ = @import("test_runner.zig");
     _ = Validator;
+    _ = compiled_mod;
 }
