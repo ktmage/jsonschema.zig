@@ -106,7 +106,7 @@ fn collectEvaluatedProperties(
         if (pp_val == .object) {
             var inst_it = instance_obj.iterator();
             while (inst_it.next()) |entry| {
-                if (pattern_properties.matchesAnyPattern(ctx.allocator, entry.key_ptr.*, pp_val.object)) {
+                if (pattern_properties.matchesAnyPattern(ctx.allocator, entry.key_ptr.*, pp_val.object, ctx.regex_cache)) {
                     evaluated.put(entry.key_ptr.*, {}) catch {};
                 }
             }
@@ -126,7 +126,7 @@ fn collectEvaluatedProperties(
             }
             if (!covered) {
                 if (obj.get("patternProperties")) |pp_val| {
-                    if (pp_val == .object and pattern_properties.matchesAnyPattern(ctx.allocator, prop_name, pp_val.object)) covered = true;
+                    if (pp_val == .object and pattern_properties.matchesAnyPattern(ctx.allocator, prop_name, pp_val.object, ctx.regex_cache)) covered = true;
                 }
             }
             if (!covered) {
@@ -249,9 +249,7 @@ fn addAllProperties(instance: std.json.Value, evaluated: *std.StringHashMap(void
 }
 
 fn subschemaValid(ctx: Context, sub_schema: std.json.Value, instance: std.json.Value) bool {
-    const result = ctx.validateSubschema(sub_schema, instance, ctx.instance_path, ctx.schema_path);
-    defer result.deinit();
-    return result.isValid();
+    return ctx.isSubschemaValid(sub_schema, instance);
 }
 
 fn resolveRef(ctx: Context, ref_str: []const u8) ?std.json.Value {

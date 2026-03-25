@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+pub const RegexCache = @import("regex_cache.zig").RegexCache;
 
 /// Minimal Draft-07 metaschema (covers type, minLength, maxLength, minimum, maximum, etc.)
 const draft07_metaschema_json =
@@ -147,12 +148,15 @@ pub const SchemaRegistry = struct {
     /// Parsed metaschema (kept alive for the lifetime of the registry)
     metaschema_parsed: ?std.json.Parsed(std.json.Value) = null,
     metaschema_2020_parsed: ?std.json.Parsed(std.json.Value) = null,
+    /// Regex cache for compiled patterns (avoids repeated regcomp calls)
+    regex_cache: RegexCache,
 
     pub fn init(allocator: Allocator) SchemaRegistry {
         return .{
             .allocator = allocator,
             .schemas = std.StringHashMap(std.json.Value).init(allocator),
             .anchors = std.StringHashMap(std.json.Value).init(allocator),
+            .regex_cache = RegexCache.init(allocator),
         };
     }
 
@@ -161,6 +165,7 @@ pub const SchemaRegistry = struct {
         if (self.metaschema_2020_parsed) |p| p.deinit();
         self.schemas.deinit();
         self.anchors.deinit();
+        self.regex_cache.deinit();
     }
 
     /// Ensure the draft-07 metaschema is registered.

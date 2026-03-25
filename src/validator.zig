@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const jsonschema = @import("main.zig");
 const ValidationError = jsonschema.ValidationError;
 const JsonPointer = jsonschema.JsonPointer;
+pub const RegexCache = @import("regex_cache.zig").RegexCache;
 
 /// Dynamic scope entry: tracks which schema resource is being evaluated
 pub const DynamicScopeEntry = struct {
@@ -26,6 +27,10 @@ pub const Context = struct {
     ref_base_uri: []const u8 = "",
     /// Dynamic scope stack for $dynamicRef resolution
     dynamic_scope: ?*std.ArrayList(DynamicScopeEntry) = null,
+    /// When true, skip error detail construction for fast boolean-only validation.
+    valid_only: bool = false,
+    /// Optional regex cache for avoiding repeated regcomp() calls.
+    regex_cache: ?*RegexCache = null,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -48,8 +53,35 @@ pub const Context = struct {
         );
     }
 
+    /// Fast boolean-only sub-schema validation (no error details, no path building).
+    pub fn isSubschemaValid(
+        self: Context,
+        sub_schema: std.json.Value,
+        instance: std.json.Value,
+    ) bool {
+        return jsonschema.isValidFull(
+            self.allocator,
+            self.root_schema,
+            sub_schema,
+            instance,
+            self.registry,
+            self.base_uri,
+            self.dynamic_scope,
+        );
+    }
+
     /// Add a validation error to the error list.
     pub fn addError(self: Context, keyword: []const u8, message: []const u8) void {
+        if (self.valid_only) {
+            // In valid_only mode, add a sentinel error with no allocations
+            self.errors.append(.{
+                .instance_path = "",
+                .schema_path = "",
+                .keyword = keyword,
+                .message = "",
+            }) catch return;
+            return;
+        }
         const schema_p = JsonPointer.appendProperty(self.allocator, self.schema_path, keyword);
         self.errors.append(.{
             .instance_path = self.allocator.dupe(u8, self.instance_path) catch return,
@@ -208,6 +240,8 @@ pub fn validateAll(ctx: Context) void {
             } else {
                 validator_fn(ctx);
             }
+            // Early exit in valid_only mode: stop on first error
+            if (ctx.valid_only and ctx.errors.items.len > 0) return;
         }
     }
 }
