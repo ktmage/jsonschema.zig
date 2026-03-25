@@ -43,6 +43,9 @@ pub fn validate(ctx: Context) void {
             const prop_name_z = ctx.allocator.dupeZ(u8, prop_name) catch continue;
 
             if (c.regexec(&regex, prop_name_z.ptr, 0, null, 0) == 0) {
+                // Fast path: skip path allocation for valid properties
+                if (ctx.compiled != null and ctx.isSubschemaValid(sub_schema, prop_value)) continue;
+
                 const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
 
                 const result = ctx.validateSubschema(sub_schema, prop_value, prop_instance_path, pattern_schema_path);

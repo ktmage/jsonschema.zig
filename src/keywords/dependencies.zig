@@ -26,8 +26,6 @@ pub fn validate(ctx: Context) void {
         // Only check dependency if the property exists in the instance
         if (instance_obj.get(prop_name) == null) continue;
 
-        const dep_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, prop_name);
-
         switch (dep_value) {
             // Array form: if "prop_name" exists, all listed properties must also exist
             .array => |dep_array| {
@@ -48,6 +46,10 @@ pub fn validate(ctx: Context) void {
             },
             // Schema form (object or boolean): if "prop_name" exists, the whole instance must match the schema
             .object, .bool => {
+                // Fast path: skip path allocation for valid schema dependencies
+                if (ctx.compiled != null and ctx.isSubschemaValid(dep_value, ctx.instance)) continue;
+
+                const dep_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, prop_name);
                 const result = ctx.validateSubschema(dep_value, ctx.instance, ctx.instance_path, dep_schema_path);
                 defer result.deinit();
 

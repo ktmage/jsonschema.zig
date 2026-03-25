@@ -56,6 +56,9 @@ pub fn validate(ctx: Context) void {
                 // true means any additional properties are allowed
             },
             .object => {
+                // Fast path: skip path allocation for valid properties
+                if (ctx.compiled != null and ctx.isSubschemaValid(additional, prop_value)) continue;
+
                 // Additional properties must validate against this schema
                 const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
 

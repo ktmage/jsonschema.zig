@@ -19,6 +19,9 @@ pub fn validate(ctx: Context) void {
     const base_path = json_pointer.appendProperty(ctx.allocator, ctx.schema_path, "prefixItems");
     const count = @min(arr.items.len, schemas.items.len);
     for (0..count) |i| {
+        // Fast path: skip path allocation for valid items
+        if (ctx.compiled != null and ctx.isSubschemaValid(schemas.items[i], arr.items[i])) continue;
+
         const schema_i_path = json_pointer.appendIndex(ctx.allocator, base_path, i);
         const item_path = json_pointer.appendIndex(ctx.allocator, ctx.instance_path, i);
         const result = ctx.validateSubschema(

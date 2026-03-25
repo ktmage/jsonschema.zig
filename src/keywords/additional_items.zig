@@ -34,6 +34,9 @@ pub fn validate(ctx: Context) void {
         // schema: additional items must match the schema
         .object => {
             for (items_schemas.items.len..arr.items.len) |i| {
+                // Fast path: skip path allocation for valid items
+                if (ctx.compiled != null and ctx.isSubschemaValid(additional_items_value, arr.items[i])) continue;
+
                 const item_path = json_pointer.appendIndex(ctx.allocator, ctx.instance_path, i);
                 const result = ctx.validateSubschema(
                     additional_items_value,

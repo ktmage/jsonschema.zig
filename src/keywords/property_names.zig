@@ -22,6 +22,9 @@ pub fn validate(ctx: Context) void {
         // Treat the property name as a JSON string value for validation
         const name_value = std.json.Value{ .string = prop_name };
 
+        // Fast path: skip path allocation for valid property names
+        if (ctx.compiled != null and ctx.isSubschemaValid(names_schema, name_value)) continue;
+
         const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
 
         const result = ctx.validateSubschema(names_schema, name_value, prop_instance_path, names_schema_path);
