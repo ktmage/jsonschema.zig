@@ -38,6 +38,55 @@ pub const Context = struct {
         instance_path: []const u8,
         schema_path: []const u8,
     ) jsonschema.ValidationResult {
+        // Fast path: when compiled schema is available, skip validateFull overhead
+        // (no isDraft2020 check, no $id resolution, no registry lookup, no dynamic_scope push/pop)
+        if (self.compiled != null) {
+            switch (sub_schema) {
+                .bool => |b| {
+                    if (b) {
+                        return .{ .errors = &.{}, .allocator = self.allocator };
+                    } else {
+                        // false schema rejects everything
+                        const err = jsonschema.ValidationError{
+                            .instance_path = self.allocator.dupe(u8, instance_path) catch "",
+                            .schema_path = self.allocator.dupe(u8, schema_path) catch "",
+                            .keyword = "false schema",
+                            .message = self.allocator.dupe(u8, "Schema is false — all values are rejected") catch "",
+                        };
+                        const errors = self.allocator.alloc(jsonschema.ValidationError, 1) catch return .{ .errors = &.{}, .allocator = self.allocator };
+                        errors[0] = err;
+                        return .{ .errors = errors, .allocator = self.allocator };
+                    }
+                },
+                .object => {
+                    var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                    const child = Context{
+                        .allocator = self.allocator,
+                        .root_schema = self.root_schema,
+                        .schema = sub_schema,
+                        .instance = instance,
+                        .instance_path = instance_path,
+                        .schema_path = schema_path,
+                        .errors = &errors,
+                        .registry = self.registry,
+                        .base_uri = self.base_uri,
+                        .ref_base_uri = self.base_uri,
+                        .dynamic_scope = self.dynamic_scope,
+                        .compiled = self.compiled,
+                    };
+                    validateAll(child);
+                    return .{
+                        .errors = errors.toOwnedSlice() catch &.{},
+                        .allocator = self.allocator,
+                    };
+                },
+                else => {
+                    return .{ .errors = &.{}, .allocator = self.allocator };
+                },
+            }
+        }
+
+        // Slow path: full validation with $id resolution, draft detection, etc.
         return jsonschema.validateFull(
             self.allocator,
             self.root_schema,
