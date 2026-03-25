@@ -52,7 +52,9 @@ pub const CompiledSchema = struct {
             reg.scanIds(root_id, schema);
         }
 
-        // Recursively walk the schema tree and compile every object node
+        // Recursively walk the schema tree and compile every object node.
+        // Uses placeholder pattern: each node is registered before recursing
+        // into sub-schemas, so child nodes are available for pre-linking.
         compileNode(alloc, schema, &node_map, is_2020, validation_vocab_disabled);
 
         return .{
@@ -92,6 +94,19 @@ pub const SimpleType = enum(u8) {
     object,
 };
 
+/// A pre-linked reference to a sub-schema, storing both the compiled node
+/// pointer (for fast validation) and the original JSON value (for slow path).
+pub const LinkedSchema = struct {
+    node: ?*const CompiledNode,
+    value: std.json.Value,
+};
+
+/// A compiled property entry: property name + pre-linked sub-schema.
+pub const PropertyEntry = struct {
+    name: []const u8,
+    schema: LinkedSchema,
+};
+
 /// Tagged union replacing function pointer + json value pairs.
 /// Each variant carries pre-extracted native data, eliminating runtime
 /// hash lookups and JSON-to-native conversions during validation.
@@ -124,6 +139,19 @@ pub const CompiledValidator = union(enum) {
     required: []const []const u8,
     min_properties: u64,
     max_properties: u64,
+
+    // Pre-linked sub-schema variants (sub-schemas resolved at compile time).
+    // No keyword_value stored — validateAll sets current_keyword_value = null
+    // so keyword functions fall back to ctx.schema.object.get(keyword_name).
+    properties_compiled: []const PropertyEntry,
+    all_of_compiled: []const LinkedSchema,
+    one_of_compiled: []const LinkedSchema,
+    any_of_compiled: []const LinkedSchema,
+    not_compiled: LinkedSchema,
+    items_compiled: struct {
+        schema: LinkedSchema,
+        prefix_count: usize,
+    },
 
     // Complex keywords — keep as generic with function pointer fallback
     // These need full schema context (pattern matching, URI resolution, etc.)
@@ -168,7 +196,7 @@ pub const CompiledNode = struct {
 
 /// Check if a single compiled validator is valid for an instance.
 /// Returns null if the validator can't be inlined (caller must use full path).
-fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     switch (v) {
         .type_single => |st| {
             return Validator.matchesSimpleType(instance, st);
@@ -268,6 +296,65 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, _: *const Co
             };
             return obj.count() <= limit;
         },
+        .properties_compiled => |entries| {
+            const inst_obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            for (entries) |entry| {
+                const inst_val = inst_obj.get(entry.name) orelse continue;
+                const result = validateLinkedSchema(entry.schema, inst_val, compiled) orelse return null;
+                if (!result) return false;
+            }
+            return true;
+        },
+        .all_of_compiled => |schemas| {
+            for (schemas) |s| {
+                const result = validateLinkedSchema(s, instance, compiled) orelse return null;
+                if (!result) return false;
+            }
+            return true;
+        },
+        .one_of_compiled => |schemas| {
+            var match_count: usize = 0;
+            for (schemas) |s| {
+                if (!@import("keywords/one_of.zig").couldMatch(s.value, instance)) continue;
+                const result = validateLinkedSchema(s, instance, compiled) orelse return null;
+                if (result) {
+                    match_count += 1;
+                    if (match_count > 1) return false;
+                }
+            }
+            return match_count == 1;
+        },
+        .any_of_compiled => |schemas| {
+            var any_null = false;
+            for (schemas) |s| {
+                if (validateLinkedSchema(s, instance, compiled)) |result| {
+                    if (result) return true;
+                } else {
+                    any_null = true;
+                }
+            }
+            if (any_null) return null;
+            return false;
+        },
+        .not_compiled => |ls| {
+            const result = validateLinkedSchema(ls, instance, compiled) orelse return null;
+            return !result;
+        },
+        .items_compiled => |ic| {
+            const arr = switch (instance) {
+                .array => |a| a.items,
+                else => return true,
+            };
+            if (arr.len <= ic.prefix_count) return true;
+            for (arr[ic.prefix_count..]) |item| {
+                const result = validateLinkedSchema(ic.schema, item, compiled) orelse return null;
+                if (!result) return false;
+            }
+            return true;
+        },
         .generic => return null, // can't inline generic validators
     }
 }
@@ -300,6 +387,36 @@ fn getUint(val: std.json.Value) ?u64 {
     };
 }
 
+/// Check if a linked schema's isValidFast is guaranteed to not return null
+/// at the immediate level (no .generic, .pattern, .unique_items, .contains).
+/// This is a 1-level check — deeper pre-linked variants may still return null.
+fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    if (ls.node) |node| {
+        if (node.needs_uri_resolution) return null;
+        return node.isValidFast(instance, compiled);
+    }
+    return switch (ls.value) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
+fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) LinkedSchema {
+    const node: ?*const CompiledNode = switch (value) {
+        .object => |o| node_map.get(@intFromPtr(o.keys().ptr)),
+        else => null,
+    };
+    return .{ .node = node, .value = value };
+}
+
+fn linkSchemaArray(alloc: Allocator, node_map: *const CompiledSchema.NodeMap, items: []const std.json.Value) []const LinkedSchema {
+    var result = std.ArrayList(LinkedSchema).init(alloc);
+    for (items) |item| {
+        result.append(linkSchema(node_map, item)) catch {};
+    }
+    return result.toOwnedSlice() catch &.{};
+}
+
 // ---------------------------------------------------------------------------
 // Compilation helpers
 // ---------------------------------------------------------------------------
@@ -314,42 +431,35 @@ fn compileNode(
     switch (schema) {
         .object => |obj| {
             const key = @intFromPtr(obj.keys().ptr);
-            // Already compiled?
             if (node_map.get(key) != null) return;
 
-            // Determine which validators are present and pre-extract their values
-            var validators = std.ArrayList(CompiledValidator).init(alloc);
+            // 1. Register placeholder node (prevents infinite recursion on
+            //    circular $ref and makes this node addressable by children).
+            const node = alloc.create(CompiledNode) catch return;
+            node.* = .{ .validators = &.{}, .ref_overrides = false };
+            node_map.put(key, node) catch return;
 
+            // 2. Recurse into sub-schemas so child nodes are available
+            //    for pre-linking when we compile this node's keywords.
+            recurseIntoSubSchemas(alloc, obj, node_map, is_2020, validation_vocab_disabled);
+
+            // 3. Compile keywords with pre-linking via node_map.
             const has_ref = obj.get("$ref") != null;
             const ref_overrides = has_ref and !is_2020;
-
+            var validators = std.ArrayList(CompiledValidator).init(alloc);
             if (!ref_overrides) {
-                // Process keywords in the same order as keyword_table
-                // to maintain validation order consistency.
-                compileKeywords(alloc, obj, &validators, validation_vocab_disabled);
+                compileKeywords(alloc, obj, &validators, validation_vocab_disabled, node_map);
             }
-            // If ref_overrides, we leave validators empty — validateAll will
-            // call ref.validate directly anyway.  But we still record the node
-            // so the lookup succeeds (and ref_overrides flag is set).
 
-            // Detect simple type-only schemas: {"type": "xxx"}
-            const simple_type = detectSimpleType(obj);
-
-            const needs_uri = obj.get("$id") != null or obj.get("$ref") != null;
-            const node = alloc.create(CompiledNode) catch return;
+            // 4. Fill in placeholder with actual data.
             node.* = .{
                 .validators = validators.toOwnedSlice() catch &.{},
                 .ref_overrides = ref_overrides,
-                .simple_type = simple_type,
-                .needs_uri_resolution = needs_uri,
+                .simple_type = detectSimpleType(obj),
+                .needs_uri_resolution = has_ref or obj.get("$id") != null,
             };
-            node_map.put(key, node) catch return;
-
-            // Recurse into sub-schemas
-            recurseIntoSubSchemas(alloc, obj, node_map, is_2020, validation_vocab_disabled);
         },
         .array => |arr| {
-            // Schema arrays (allOf, anyOf, oneOf items, etc.)
             for (arr.items) |item| {
                 compileNode(alloc, item, node_map, is_2020, validation_vocab_disabled);
             }
@@ -366,6 +476,7 @@ fn compileKeywords(
     obj: std.json.ObjectMap,
     validators: *std.ArrayList(CompiledValidator),
     validation_vocab_disabled: bool,
+    node_map: *const CompiledSchema.NodeMap,
 ) void {
     // Type checking
     if (obj.get("type")) |kv| {
@@ -455,11 +566,24 @@ fn compileKeywords(
         } }) catch {};
     }
     if (obj.get("items")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/items.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "items",
-        } }) catch {};
+        switch (kv) {
+            .object, .bool => {
+                validators.append(.{ .items_compiled = .{
+                    .schema = linkSchema(node_map, kv),
+                    .prefix_count = if (obj.get("prefixItems")) |pi| switch (pi) {
+                        .array => |a| a.items.len,
+                        else => 0,
+                    } else 0,
+                } }) catch {};
+            },
+            else => {
+                validators.append(.{ .generic = .{
+                    .func = @import("keywords/items.zig").validate,
+                    .keyword_value = kv,
+                    .keyword_name = "items",
+                } }) catch {};
+            },
+        }
     }
     if (obj.get("additionalItems")) |kv| {
         validators.append(.{ .generic = .{
@@ -509,11 +633,20 @@ fn compileKeywords(
 
     // Object
     if (obj.get("properties")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/properties.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "properties",
-        } }) catch {};
+        switch (kv) {
+            .object => |props_obj| {
+                var entries = std.ArrayList(PropertyEntry).init(alloc);
+                var it = props_obj.iterator();
+                while (it.next()) |entry| {
+                    entries.append(.{
+                        .name = entry.key_ptr.*,
+                        .schema = linkSchema(node_map, entry.value_ptr.*),
+                    }) catch {};
+                }
+                validators.append(.{ .properties_compiled = entries.toOwnedSlice() catch &.{} }) catch {};
+            },
+            else => {},
+        }
     }
     if (obj.get("required")) |kv| {
         if (!validation_vocab_disabled) {
@@ -583,32 +716,31 @@ fn compileKeywords(
 
     // Logical composition
     if (obj.get("allOf")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/all_of.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "allOf",
-        } }) catch {};
+        switch (kv) {
+            .array => |arr| {
+                validators.append(.{ .all_of_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+            },
+            else => {},
+        }
     }
     if (obj.get("anyOf")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/any_of.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "anyOf",
-        } }) catch {};
+        switch (kv) {
+            .array => |arr| {
+                validators.append(.{ .any_of_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+            },
+            else => {},
+        }
     }
     if (obj.get("oneOf")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/one_of.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "oneOf",
-        } }) catch {};
+        switch (kv) {
+            .array => |arr| {
+                validators.append(.{ .one_of_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+            },
+            else => {},
+        }
     }
     if (obj.get("not")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/not_keyword.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "not",
-        } }) catch {};
+        validators.append(.{ .not_compiled = linkSchema(node_map, kv) }) catch {};
     }
 
     // Reference

@@ -567,6 +567,39 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("maxProperties", "Object has too many properties");
                         }
                     },
+                    .properties_compiled => |_| {
+                        var child = ctx;
+                        child.current_keyword_value = null;
+                        child.compiled_node = null;
+                        @import("keywords/properties.zig").validate(child);
+                    },
+                    .all_of_compiled => |_| {
+                        var child = ctx;
+                        child.current_keyword_value = null;
+                        child.compiled_node = null;
+                        @import("keywords/all_of.zig").validate(child);
+                    },
+                    .one_of_compiled => |_| {
+                        var child = ctx;
+                        child.current_keyword_value = null;
+                        child.compiled_node = null;
+                        @import("keywords/one_of.zig").validate(child);
+                    },
+                    .any_of_compiled => |_| {
+                        var child = ctx;
+                        child.current_keyword_value = null;
+                        child.compiled_node = null;
+                        @import("keywords/any_of.zig").validate(child);
+                    },
+                    .not_compiled => |_| {
+                        var child = ctx;
+                        child.current_keyword_value = null;
+                        child.compiled_node = null;
+                        @import("keywords/not_keyword.zig").validate(child);
+                    },
+                    .items_compiled => |_| {
+                        @import("keywords/items.zig").validate(ctx);
+                    },
                     .generic => |g| {
                         var child = ctx;
                         child.current_keyword_value = g.keyword_value;
