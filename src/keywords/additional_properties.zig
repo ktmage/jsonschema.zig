@@ -3,6 +3,7 @@ const validator = @import("../validator.zig");
 const Context = validator.Context;
 const JsonPointer = @import("../json_pointer.zig");
 const pattern_properties = @import("pattern_properties.zig");
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
     const schema_obj = ctx.schema.object;
@@ -26,6 +27,9 @@ pub fn validate(ctx: Context) void {
     } else null;
 
     const additional_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "additionalProperties");
+
+    // Pre-lookup compiled node for the additional properties schema once
+    const additional_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |c| c.getNode(additional) else null;
 
     var it = instance_obj.iterator();
     while (it.next()) |entry| {
@@ -56,8 +60,8 @@ pub fn validate(ctx: Context) void {
                 // true means any additional properties are allowed
             },
             .object => {
-                // Fast path: skip path allocation for valid properties
-                if (ctx.compiled != null and ctx.isSubschemaValid(additional, prop_value)) continue;
+                // Fast path: skip path allocation for valid properties (node pre-looked-up)
+                if (ctx.compiled != null and ctx.isSubschemaValidWithNode(additional, prop_value, additional_node)) continue;
 
                 // Additional properties must validate against this schema
                 const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);

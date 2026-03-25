@@ -2,6 +2,7 @@ const std = @import("std");
 const validator = @import("../validator.zig");
 const Context = validator.Context;
 const json_pointer = @import("../json_pointer.zig");
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
     const schema_obj = ctx.schema.object;
@@ -12,10 +13,13 @@ pub fn validate(ctx: Context) void {
         else => return, // non-arrays pass
     };
 
+    // Pre-lookup compiled node once for the contains schema
+    const contains_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |c| c.getNode(contains_schema) else null;
+
     // Count how many items match
     var match_count: usize = 0;
     for (arr.items) |item| {
-        if (ctx.isSubschemaValid(contains_schema, item)) {
+        if (ctx.isSubschemaValidWithNode(contains_schema, item, contains_node)) {
             match_count += 1;
         }
     }

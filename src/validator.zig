@@ -49,6 +49,9 @@ pub const Context = struct {
     dynamic_scope: ?*std.ArrayList(DynamicScopeEntry) = null,
     /// Pre-compiled schema for fast dispatch (null = use legacy path).
     compiled: ?*const CompiledSchema = null,
+    /// Pre-looked-up compiled node for the current schema.
+    /// When set, validateAll skips the hashmap lookup entirely.
+    compiled_node: ?*const compiled_mod.CompiledNode = null,
     /// Current keyword value, set by compiled dispatch to avoid re-lookup.
     current_keyword_value: ?std.json.Value = null,
 
@@ -62,7 +65,7 @@ pub const Context = struct {
     ) jsonschema.ValidationResult {
         // Fast path: when compiled schema is available, skip validateFull overhead
         // (no isDraft2020 check, no $id resolution, no registry lookup, no dynamic_scope push/pop)
-        if (self.compiled != null) {
+        if (self.compiled) |compiled| {
             switch (sub_schema) {
                 .bool => |b| {
                     if (b) {
@@ -81,8 +84,10 @@ pub const Context = struct {
                     }
                 },
                 .object => {
-                    // Ultra-fast: simple type-only schemas (e.g. {"type": "string"})
-                    if (self.compiled.?.getNode(sub_schema)) |node| {
+                    // Look up compiled node ONCE — reused by validateAll via compiled_node
+                    const looked_up_node = compiled.getNode(sub_schema);
+                    if (looked_up_node) |node| {
+                        // Ultra-fast: simple type-only schemas (e.g. {"type": "string"})
                         if (node.simple_type != .none) {
                             if (matchesSimpleType(instance, node.simple_type)) {
                                 return .{ .errors = &.{}, .allocator = self.allocator };
@@ -113,6 +118,7 @@ pub const Context = struct {
                         .ref_base_uri = self.base_uri,
                         .dynamic_scope = self.dynamic_scope,
                         .compiled = self.compiled,
+                        .compiled_node = looked_up_node,
                     };
                     validateAll(child);
                     if (errors.items.len == 0) {
@@ -156,8 +162,10 @@ pub const Context = struct {
             switch (sub_schema) {
                 .bool => |b| return b,
                 .object => {
-                    // Ultra-fast path: simple type-only schemas
-                    if (compiled.getNode(sub_schema)) |node| {
+                    // Look up compiled node ONCE — reused by validateAll via compiled_node
+                    const looked_up_node = compiled.getNode(sub_schema);
+                    if (looked_up_node) |node| {
+                        // Ultra-fast path: simple type-only schemas
                         if (node.simple_type != .none) {
                             return matchesSimpleType(instance, node.simple_type);
                         }
@@ -179,6 +187,7 @@ pub const Context = struct {
                         .ref_base_uri = self.base_uri,
                         .dynamic_scope = self.dynamic_scope,
                         .compiled = self.compiled,
+                        .compiled_node = looked_up_node,
                     };
                     validateAll(child);
                     return errors.items.len == 0;
@@ -188,6 +197,52 @@ pub const Context = struct {
         }
 
         // Slow path: use validateSubschema
+        const result = self.validateSubschema(sub_schema, instance, "", "");
+        defer result.deinit();
+        return result.isValid();
+    }
+
+    /// Like isSubschemaValid, but accepts a pre-looked-up CompiledNode to avoid
+    /// redundant hashmap lookups when the caller has already done getNode().
+    pub fn isSubschemaValidWithNode(
+        self: Context,
+        sub_schema: std.json.Value,
+        instance: std.json.Value,
+        pre_node: ?*const compiled_mod.CompiledNode,
+    ) bool {
+        if (self.compiled != null) {
+            switch (sub_schema) {
+                .bool => |b| return b,
+                .object => {
+                    if (pre_node) |node| {
+                        if (node.simple_type != .none) {
+                            return matchesSimpleType(instance, node.simple_type);
+                        }
+                    }
+                    var buf: [512]u8 = undefined;
+                    var fba = std.heap.FixedBufferAllocator.init(&buf);
+                    var errors = std.ArrayList(ValidationError).init(fba.allocator());
+                    const child = Context{
+                        .allocator = fba.allocator(),
+                        .root_schema = self.root_schema,
+                        .schema = sub_schema,
+                        .instance = instance,
+                        .instance_path = "",
+                        .schema_path = "",
+                        .errors = &errors,
+                        .registry = self.registry,
+                        .base_uri = self.base_uri,
+                        .ref_base_uri = self.base_uri,
+                        .dynamic_scope = self.dynamic_scope,
+                        .compiled = self.compiled,
+                        .compiled_node = pre_node,
+                    };
+                    validateAll(child);
+                    return errors.items.len == 0;
+                },
+                else => return true,
+            }
+        }
         const result = self.validateSubschema(sub_schema, instance, "", "");
         defer result.deinit();
         return result.isValid();
@@ -329,21 +384,26 @@ fn isValidationVocabDisabled(ctx: Context) bool {
 pub fn validateAll(ctx: Context) void {
     // Fast path: use pre-compiled node if available
     if (ctx.compiled) |compiled| {
-        if (compiled.getNode(ctx.schema)) |node| {
-            if (node.ref_overrides) {
+        // Use pre-looked-up node if available, otherwise do the hashmap lookup
+        const node = ctx.compiled_node orelse compiled.getNode(ctx.schema);
+        if (node) |n| {
+            if (n.ref_overrides) {
                 @import("keywords/ref.zig").validate(ctx);
                 return;
             }
             // Ultra-fast path: simple type-only schemas like {"type": "number"}
-            if (node.simple_type != .none) {
-                if (!matchesSimpleType(ctx.instance, node.simple_type)) {
+            if (n.simple_type != .none) {
+                if (!matchesSimpleType(ctx.instance, n.simple_type)) {
                     ctx.addError("type", "Instance does not match the expected type");
                 }
                 return;
             }
-            for (node.entries) |entry| {
+            for (n.entries) |entry| {
                 var child = ctx;
                 child.current_keyword_value = entry.keyword_value;
+                // Clear compiled_node so nested validateAll calls don't
+                // reuse a stale node pointer from the parent.
+                child.compiled_node = null;
                 entry.func(child);
             }
             return;

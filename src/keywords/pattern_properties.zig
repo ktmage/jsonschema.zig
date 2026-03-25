@@ -3,6 +3,7 @@ const validator = @import("../validator.zig");
 const Context = validator.Context;
 const JsonPointer = @import("../json_pointer.zig");
 const c = @cImport(@cInclude("regex.h"));
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
     const value = ctx.current_keyword_value orelse ctx.schema.object.get("patternProperties") orelse return;
@@ -26,6 +27,9 @@ pub fn validate(ctx: Context) void {
 
         const pattern_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, pattern);
 
+        // Pre-lookup compiled node once per pattern's sub_schema
+        const sub_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |comp| comp.getNode(sub_schema) else null;
+
         // Null-terminate the pattern for POSIX regex
         const pattern_z = ctx.allocator.dupeZ(u8, pattern) catch continue;
 
@@ -43,8 +47,8 @@ pub fn validate(ctx: Context) void {
             const prop_name_z = ctx.allocator.dupeZ(u8, prop_name) catch continue;
 
             if (c.regexec(&regex, prop_name_z.ptr, 0, null, 0) == 0) {
-                // Fast path: skip path allocation for valid properties
-                if (ctx.compiled != null and ctx.isSubschemaValid(sub_schema, prop_value)) continue;
+                // Fast path: skip path allocation for valid properties (node pre-looked-up)
+                if (ctx.compiled != null and ctx.isSubschemaValidWithNode(sub_schema, prop_value, sub_node)) continue;
 
                 const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
 

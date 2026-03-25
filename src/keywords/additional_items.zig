@@ -2,6 +2,7 @@ const std = @import("std");
 const validator = @import("../validator.zig");
 const Context = validator.Context;
 const json_pointer = @import("../json_pointer.zig");
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
     const schema_obj = ctx.schema.object;
@@ -33,9 +34,11 @@ pub fn validate(ctx: Context) void {
         },
         // schema: additional items must match the schema
         .object => {
+            // Pre-lookup compiled node once for the additional items schema
+            const additional_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |c| c.getNode(additional_items_value) else null;
             for (items_schemas.items.len..arr.items.len) |i| {
-                // Fast path: skip path allocation for valid items
-                if (ctx.compiled != null and ctx.isSubschemaValid(additional_items_value, arr.items[i])) continue;
+                // Fast path: skip path allocation for valid items (node pre-looked-up)
+                if (ctx.compiled != null and ctx.isSubschemaValidWithNode(additional_items_value, arr.items[i], additional_node)) continue;
 
                 const item_path = json_pointer.appendIndex(ctx.allocator, ctx.instance_path, i);
                 const result = ctx.validateSubschema(

@@ -2,6 +2,7 @@ const std = @import("std");
 const validator = @import("../validator.zig");
 const Context = validator.Context;
 const JsonPointer = @import("../json_pointer.zig");
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
     const schema_obj = ctx.schema.object;
@@ -15,6 +16,9 @@ pub fn validate(ctx: Context) void {
 
     const names_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "propertyNames");
 
+    // Pre-lookup compiled node once for the propertyNames schema
+    const names_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |comp| comp.getNode(names_schema) else null;
+
     var it = instance_obj.iterator();
     while (it.next()) |entry| {
         const prop_name = entry.key_ptr.*;
@@ -22,8 +26,8 @@ pub fn validate(ctx: Context) void {
         // Treat the property name as a JSON string value for validation
         const name_value = std.json.Value{ .string = prop_name };
 
-        // Fast path: skip path allocation for valid property names
-        if (ctx.compiled != null and ctx.isSubschemaValid(names_schema, name_value)) continue;
+        // Fast path: skip path allocation for valid property names (node pre-looked-up)
+        if (ctx.compiled != null and ctx.isSubschemaValidWithNode(names_schema, name_value, names_node)) continue;
 
         const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
 

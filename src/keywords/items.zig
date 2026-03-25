@@ -2,6 +2,7 @@ const std = @import("std");
 const validator = @import("../validator.zig");
 const Context = validator.Context;
 const json_pointer = @import("../json_pointer.zig");
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
     const schema_obj = ctx.schema.object;
@@ -16,6 +17,9 @@ pub fn validate(ctx: Context) void {
     // that applies to items AFTER prefixItems
     const has_prefix_items = schema_obj.get("prefixItems") != null;
 
+    // Pre-lookup the compiled node for items_value once (used across all iterations)
+    const items_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |c| c.getNode(items_value) else null;
+
     if (has_prefix_items) {
         // 2020-12 behavior: items applies to items beyond prefixItems
         const prefix_count = blk: {
@@ -28,6 +32,19 @@ pub fn validate(ctx: Context) void {
 
         // items is always a single schema in 2020-12 mode
         if (arr.items.len <= prefix_count) return;
+
+        // Fast path: skip path allocation for valid items using pre-looked-up node
+        if (ctx.compiled != null) {
+            var all_valid = true;
+            for (prefix_count..arr.items.len) |i| {
+                if (!ctx.isSubschemaValidWithNode(items_value, arr.items[i], items_node)) {
+                    all_valid = false;
+                    break;
+                }
+            }
+            if (all_valid) return;
+        }
+
         const items_path = json_pointer.appendProperty(ctx.allocator, ctx.schema_path, "items");
         for (prefix_count..arr.items.len) |i| {
             const item_path = json_pointer.appendIndex(ctx.allocator, ctx.instance_path, i);
@@ -51,8 +68,8 @@ pub fn validate(ctx: Context) void {
             // Single schema: all items must match
             .object, .bool => {
                 for (arr.items, 0..) |item, i| {
-                    // Fast path: skip path allocation for valid items
-                    if (ctx.compiled != null and ctx.isSubschemaValid(items_value, item)) continue;
+                    // Fast path: skip path allocation for valid items (node pre-looked-up)
+                    if (ctx.compiled != null and ctx.isSubschemaValidWithNode(items_value, item, items_node)) continue;
 
                     const items_path = json_pointer.appendProperty(ctx.allocator, ctx.schema_path, "items");
                     const item_path = json_pointer.appendIndex(ctx.allocator, ctx.instance_path, i);
