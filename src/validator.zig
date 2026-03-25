@@ -377,13 +377,205 @@ pub fn validateAll(ctx: Context) void {
                 }
                 return;
             }
-            for (n.entries) |entry| {
-                var child = ctx;
-                child.current_keyword_value = entry.keyword_value;
-                // Clear compiled_node so nested validateAll calls don't
-                // reuse a stale node pointer from the parent.
-                child.compiled_node = null;
-                entry.func(child);
+            for (n.validators) |v| {
+                switch (v) {
+                    .type_single => |st| {
+                        if (!matchesSimpleType(ctx.instance, st)) {
+                            ctx.addError("type", "Instance does not match the expected type");
+                        }
+                    },
+                    .type_multi => |types| {
+                        var matched = false;
+                        for (types) |st| {
+                            if (matchesSimpleType(ctx.instance, st)) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (!matched) {
+                            ctx.addError("type", "Instance does not match any of the expected types");
+                        }
+                    },
+                    .enum_check => |enum_val| {
+                        const enum_array = switch (enum_val) {
+                            .array => |a| a.items,
+                            else => continue,
+                        };
+                        var found = false;
+                        for (enum_array) |candidate| {
+                            if (@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, candidate)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            ctx.addError("enum", "Instance does not match any enum value");
+                        }
+                    },
+                    .const_check => |const_val| {
+                        if (!@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, const_val)) {
+                            ctx.addError("const", "Instance does not match the const value");
+                        }
+                    },
+                    .minimum => |limit| {
+                        const instance_num: f64 = switch (ctx.instance) {
+                            .integer => |n2| @floatFromInt(n2),
+                            .float => |f| f,
+                            else => continue,
+                        };
+                        if (instance_num < limit) {
+                            ctx.addError("minimum", "Value must be greater than or equal to minimum");
+                        }
+                    },
+                    .maximum => |limit| {
+                        const instance_num: f64 = switch (ctx.instance) {
+                            .integer => |n2| @floatFromInt(n2),
+                            .float => |f| f,
+                            else => continue,
+                        };
+                        if (instance_num > limit) {
+                            ctx.addError("maximum", "Value must be less than or equal to maximum");
+                        }
+                    },
+                    .exclusive_minimum => |limit| {
+                        const instance_num: f64 = switch (ctx.instance) {
+                            .integer => |n2| @floatFromInt(n2),
+                            .float => |f| f,
+                            else => continue,
+                        };
+                        if (instance_num <= limit) {
+                            ctx.addError("exclusiveMinimum", "Value must be strictly greater than exclusiveMinimum");
+                        }
+                    },
+                    .exclusive_maximum => |limit| {
+                        const instance_num: f64 = switch (ctx.instance) {
+                            .integer => |n2| @floatFromInt(n2),
+                            .float => |f| f,
+                            else => continue,
+                        };
+                        if (instance_num >= limit) {
+                            ctx.addError("exclusiveMaximum", "Value must be strictly less than exclusiveMaximum");
+                        }
+                    },
+                    .multiple_of => |divisor| {
+                        const instance_num: f64 = switch (ctx.instance) {
+                            .integer => |n2| @floatFromInt(n2),
+                            .float => |f| f,
+                            else => continue,
+                        };
+                        if (divisor != 0) {
+                            const remainder = @rem(instance_num, divisor);
+                            const tolerance: f64 = 1e-9;
+                            if (@abs(remainder) > tolerance and @abs(remainder) - @abs(divisor) < -tolerance) {
+                                ctx.addError("multipleOf", "Value must be a multiple of multipleOf");
+                            }
+                        }
+                    },
+                    .min_length => |limit| {
+                        const instance_str = switch (ctx.instance) {
+                            .string => |s| s,
+                            else => continue,
+                        };
+                        const codepoint_count = std.unicode.utf8CountCodepoints(instance_str) catch continue;
+                        if (codepoint_count < limit) {
+                            const msg = std.fmt.allocPrint(
+                                ctx.allocator,
+                                "String is too short: {d} codepoints, minimum {d}",
+                                .{ codepoint_count, limit },
+                            ) catch continue;
+                            defer ctx.allocator.free(msg);
+                            ctx.addError("minLength", msg);
+                        }
+                    },
+                    .max_length => |limit| {
+                        const instance_str = switch (ctx.instance) {
+                            .string => |s| s,
+                            else => continue,
+                        };
+                        const codepoint_count = std.unicode.utf8CountCodepoints(instance_str) catch continue;
+                        if (codepoint_count > limit) {
+                            const msg = std.fmt.allocPrint(
+                                ctx.allocator,
+                                "String is too long: {d} codepoints, maximum {d}",
+                                .{ codepoint_count, limit },
+                            ) catch continue;
+                            defer ctx.allocator.free(msg);
+                            ctx.addError("maxLength", msg);
+                        }
+                    },
+                    .pattern => {
+                        // Should not happen (compiled as generic), but handle gracefully
+                        continue;
+                    },
+                    .min_items => |limit| {
+                        const arr = switch (ctx.instance) {
+                            .array => |a| a,
+                            else => continue,
+                        };
+                        if (arr.items.len < limit) {
+                            ctx.addError("minItems", "Array has fewer items than minItems");
+                        }
+                    },
+                    .max_items => |limit| {
+                        const arr = switch (ctx.instance) {
+                            .array => |a| a,
+                            else => continue,
+                        };
+                        if (arr.items.len > limit) {
+                            ctx.addError("maxItems", "Array has more items than maxItems");
+                        }
+                    },
+                    .unique_items => {
+                        // Should not happen (compiled as generic), but handle gracefully
+                        continue;
+                    },
+                    .contains => {
+                        // Should not happen (compiled as generic), but handle gracefully
+                        continue;
+                    },
+                    .required => |names| {
+                        const obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        for (names) |name| {
+                            if (obj.get(name) == null) {
+                                const msg = std.fmt.allocPrint(
+                                    ctx.allocator,
+                                    "Required property '{s}' is missing",
+                                    .{name},
+                                ) catch continue;
+                                ctx.addError("required", msg);
+                            }
+                        }
+                    },
+                    .min_properties => |limit| {
+                        const obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        if (obj.count() < limit) {
+                            ctx.addError("minProperties", "Object has too few properties");
+                        }
+                    },
+                    .max_properties => |limit| {
+                        const obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        if (obj.count() > limit) {
+                            ctx.addError("maxProperties", "Object has too many properties");
+                        }
+                    },
+                    .generic => |g| {
+                        var child = ctx;
+                        child.current_keyword_value = g.keyword_value;
+                        // Clear compiled_node so nested validateAll calls don't
+                        // reuse a stale node pointer from the parent.
+                        child.compiled_node = null;
+                        g.func(child);
+                    },
+                }
             }
             return;
         }

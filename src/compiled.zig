@@ -92,12 +92,54 @@ pub const SimpleType = enum(u8) {
     object,
 };
 
+/// Tagged union replacing function pointer + json value pairs.
+/// Each variant carries pre-extracted native data, eliminating runtime
+/// hash lookups and JSON-to-native conversions during validation.
+pub const CompiledValidator = union(enum) {
+    // Type checking
+    type_single: SimpleType,
+    type_multi: []const SimpleType,
+    enum_check: std.json.Value,
+    const_check: std.json.Value,
+
+    // Numeric
+    minimum: f64,
+    maximum: f64,
+    exclusive_minimum: f64,
+    exclusive_maximum: f64,
+    multiple_of: f64,
+
+    // String
+    min_length: u64,
+    max_length: u64,
+    pattern: std.json.Value,
+
+    // Array
+    min_items: u64,
+    max_items: u64,
+    unique_items: void,
+    contains: std.json.Value,
+
+    // Object
+    required: []const []const u8,
+    min_properties: u64,
+    max_properties: u64,
+
+    // Complex keywords — keep as generic with function pointer fallback
+    // These need full schema context (pattern matching, URI resolution, etc.)
+    generic: struct {
+        func: Validator.KeywordValidator,
+        keyword_value: std.json.Value,
+        keyword_name: []const u8,
+    },
+};
+
 /// A pre-compiled schema node.  Stores only the keyword validators that are
 /// actually present in the original schema object, avoiding the need to probe
 /// the hashmap for all 30+ keywords at validation time.
 pub const CompiledNode = struct {
-    /// Pre-filtered list of validators with their pre-extracted keyword values.
-    entries: []const ValidatorEntry,
+    /// Pre-filtered list of validators as tagged unions with pre-extracted data.
+    validators: []const CompiledValidator,
     /// True if this node has $ref AND the schema is Draft 7 (not 2020-12),
     /// meaning $ref overrides all sibling keywords.
     ref_overrides: bool,
@@ -107,297 +149,126 @@ pub const CompiledNode = struct {
     /// True if this schema has $id or $ref — needs slow path for URI resolution.
     needs_uri_resolution: bool = false,
 
-    pub const ValidatorEntry = struct {
-        func: Validator.KeywordValidator,
-        keyword_value: std.json.Value,
-    };
-
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
     /// Returns false on first failure. Only works for common keyword patterns;
     /// falls back to full validation for complex keywords.
-    /// Fast boolean-only validation. Returns null if this node has keywords
-    /// that can't be inlined (caller must use FBA fallback).
+    /// Returns null if this node has keywords that can't be inlined (caller must use FBA fallback).
     pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
         if (self.simple_type != .none) {
             return Validator.matchesSimpleType(instance, self.simple_type);
         }
         if (self.ref_overrides) return null; // can't inline $ref
-        for (self.entries) |entry| {
-            const result = isEntryValid(entry, instance, compiled) orelse return null;
+        for (self.validators) |v| {
+            const result = isValidatorValid(v, instance, compiled) orelse return null;
             if (!result) return false;
         }
         return true;
     }
 };
 
-/// Check if a single keyword entry is valid for an instance.
-/// Inlines common validators to avoid function pointer overhead.
-fn isEntryValid(entry: CompiledNode.ValidatorEntry, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    const kv = entry.keyword_value;
-    const func = entry.func;
-
-    // Identify keyword by function pointer comparison and inline the check
-    if (func == @import("keywords/type_keyword.zig").validate) {
-        return isTypeValid(kv, instance);
-    }
-    if (func == @import("keywords/required.zig").validate) {
-        return isRequiredValid(kv, instance);
-    }
-    if (func == @import("keywords/properties.zig").validate) {
-        return isPropertiesValid(kv, instance, compiled);
-    }
-    if (func == @import("keywords/minimum.zig").validate) {
-        return numCmp(instance, kv, .gte);
-    }
-    if (func == @import("keywords/maximum.zig").validate) {
-        return numCmp(instance, kv, .lte);
-    }
-    if (func == @import("keywords/exclusive_minimum.zig").validate) {
-        return numCmp(instance, kv, .gt);
-    }
-    if (func == @import("keywords/exclusive_maximum.zig").validate) {
-        return numCmp(instance, kv, .lt);
-    }
-    if (func == @import("keywords/min_length.zig").validate) {
-        return isLengthValid(instance, kv, .min);
-    }
-    if (func == @import("keywords/max_length.zig").validate) {
-        return isLengthValid(instance, kv, .max);
-    }
-    if (func == @import("keywords/min_items.zig").validate) {
-        return isItemCountValid(instance, kv, .min);
-    }
-    if (func == @import("keywords/max_items.zig").validate) {
-        return isItemCountValid(instance, kv, .max);
-    }
-    if (func == @import("keywords/min_properties.zig").validate) {
-        return isPropCountValid(instance, kv, .min);
-    }
-    if (func == @import("keywords/max_properties.zig").validate) {
-        return isPropCountValid(instance, kv, .max);
-    }
-    if (func == @import("keywords/items.zig").validate) {
-        return isItemsValid(instance, kv, compiled);
-    }
-    if (func == @import("keywords/additional_properties.zig").validate) {
-        return null; // too complex to inline
-    }
-    if (func == @import("keywords/one_of.zig").validate) {
-        return isOneOfValid(kv, instance, compiled);
-    }
-    if (func == @import("keywords/any_of.zig").validate) {
-        return isAnyOfValid(kv, instance, compiled);
-    }
-    if (func == @import("keywords/all_of.zig").validate) {
-        return isAllOfValid(kv, instance, compiled);
-    }
-    if (func == @import("keywords/not_keyword.zig").validate) {
-        return isNotValid(kv, instance, compiled);
-    }
-
-    // Unknown keyword — can't inline, signal caller to use full path
-    return null;
-}
-
-fn isTypeValid(type_val: std.json.Value, instance: std.json.Value) bool {
-    switch (type_val) {
-        .string => |t| return Validator.matchesSimpleType(instance, detectSimpleTypeFromString(t)),
-        .array => |arr| {
-            for (arr.items) |item| {
-                switch (item) {
-                    .string => |t| {
-                        if (Validator.matchesSimpleType(instance, detectSimpleTypeFromString(t))) return true;
-                    },
-                    else => return true,
-                }
+/// Check if a single compiled validator is valid for an instance.
+/// Returns null if the validator can't be inlined (caller must use full path).
+fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    switch (v) {
+        .type_single => |st| {
+            return Validator.matchesSimpleType(instance, st);
+        },
+        .type_multi => |types| {
+            for (types) |st| {
+                if (Validator.matchesSimpleType(instance, st)) return true;
             }
             return false;
         },
-        else => return true,
-    }
-}
-
-fn detectSimpleTypeFromString(t: []const u8) SimpleType {
-    if (std.mem.eql(u8, t, "null")) return .null;
-    if (std.mem.eql(u8, t, "boolean")) return .boolean;
-    if (std.mem.eql(u8, t, "integer")) return .integer;
-    if (std.mem.eql(u8, t, "number")) return .number;
-    if (std.mem.eql(u8, t, "string")) return .string;
-    if (std.mem.eql(u8, t, "array")) return .array;
-    if (std.mem.eql(u8, t, "object")) return .object;
-    return .none;
-}
-
-fn isRequiredValid(req_val: std.json.Value, instance: std.json.Value) bool {
-    const obj = switch (instance) {
-        .object => |o| o,
-        else => return true,
-    };
-    const arr = switch (req_val) {
-        .array => |a| a.items,
-        else => return true,
-    };
-    for (arr) |item| {
-        switch (item) {
-            .string => |name| {
+        .enum_check => |enum_val| {
+            const enum_array = switch (enum_val) {
+                .array => |a| a.items,
+                else => return true,
+            };
+            for (enum_array) |candidate| {
+                if (@import("keywords/enum_keyword.zig").jsonEqual(instance, candidate)) return true;
+            }
+            return false;
+        },
+        .const_check => |const_val| {
+            return @import("keywords/enum_keyword.zig").jsonEqual(instance, const_val);
+        },
+        .minimum => |limit| {
+            return numCmp(instance, limit, .gte);
+        },
+        .maximum => |limit| {
+            return numCmp(instance, limit, .lte);
+        },
+        .exclusive_minimum => |limit| {
+            return numCmp(instance, limit, .gt);
+        },
+        .exclusive_maximum => |limit| {
+            return numCmp(instance, limit, .lt);
+        },
+        .multiple_of => |divisor| {
+            const n = getNumber(instance) orelse return true;
+            if (divisor == 0) return true;
+            const remainder = @rem(n, divisor);
+            const tolerance: f64 = 1e-9;
+            return @abs(remainder) <= tolerance or @abs(remainder) - @abs(divisor) >= -tolerance;
+        },
+        .min_length => |limit| {
+            const s = switch (instance) {
+                .string => |str| str,
+                else => return true,
+            };
+            const len = std.unicode.utf8CountCodepoints(s) catch return true;
+            return len >= limit;
+        },
+        .max_length => |limit| {
+            const s = switch (instance) {
+                .string => |str| str,
+                else => return true,
+            };
+            const len = std.unicode.utf8CountCodepoints(s) catch return true;
+            return len <= limit;
+        },
+        .pattern => return null, // needs regex, can't inline
+        .min_items => |limit| {
+            const arr = switch (instance) {
+                .array => |a| a.items,
+                else => return true,
+            };
+            return arr.len >= limit;
+        },
+        .max_items => |limit| {
+            const arr = switch (instance) {
+                .array => |a| a.items,
+                else => return true,
+            };
+            return arr.len <= limit;
+        },
+        .unique_items => return null, // expensive, use generic path
+        .contains => return null, // needs sub-schema validation
+        .required => |names| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            for (names) |name| {
                 if (obj.get(name) == null) return false;
-            },
-            else => {},
-        }
-    }
-    return true;
-}
-
-fn isPropertiesValid(props_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    const props = switch (props_val) {
-        .object => |o| o,
-        else => return true,
-    };
-    const inst_obj = switch (instance) {
-        .object => |o| o,
-        else => return true,
-    };
-    var it = props.iterator();
-    while (it.next()) |entry| {
-        const inst_val = inst_obj.get(entry.key_ptr.*) orelse continue;
-        const prop_schema = entry.value_ptr.*;
-        // Try compiled node for sub-schema
-        if (compiled.getNode(prop_schema)) |node| {
-            if (node.isValidFast(inst_val, compiled)) |r| { if (!r) return false; } else return null;
-        }
-        // If no compiled node, conservatively return true
-    }
-    return true;
-}
-
-fn isItemsValid(instance: std.json.Value, items_val: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    const arr = switch (instance) {
-        .array => |a| a.items,
-        else => return true,
-    };
-    switch (items_val) {
-        .object => {
-            if (compiled.getNode(items_val)) |node| {
-                for (arr) |item| {
-                    if (node.isValidFast(item, compiled)) |r| { if (!r) return false; } else return null;
-                }
             }
             return true;
         },
-        .bool => |b| return b or arr.len == 0,
-        else => return true,
-    }
-}
-
-fn isOneOfValid(one_of_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    const sub_schemas = switch (one_of_val) {
-        .array => |a| a.items,
-        else => return null,
-    };
-    var match_count: usize = 0;
-    for (sub_schemas) |sub_schema| {
-        // Use couldMatch pre-check from one_of.zig
-        if (!@import("keywords/one_of.zig").couldMatch(sub_schema, instance)) continue;
-
-        switch (sub_schema) {
-            .bool => |b| {
-                if (b) {
-                    match_count += 1;
-                    if (match_count > 1) return false;
-                }
-            },
-            .object => {
-                if (compiled.getNode(sub_schema)) |node| {
-                    if (node.isValidFast(instance, compiled)) |valid| {
-                        if (valid) {
-                            match_count += 1;
-                            if (match_count > 1) return false;
-                        }
-                    } else {
-                        return null; // can't inline this branch
-                    }
-                } else {
-                    return null; // unknown node
-                }
-            },
-            else => {
-                match_count += 1;
-                if (match_count > 1) return false;
-            },
-        }
-    }
-    return match_count == 1;
-}
-
-fn isAnyOfValid(any_of_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    const sub_schemas = switch (any_of_val) {
-        .array => |a| a.items,
-        else => return null,
-    };
-    for (sub_schemas) |sub_schema| {
-        switch (sub_schema) {
-            .bool => |b| {
-                if (b) return true;
-            },
-            .object => {
-                if (compiled.getNode(sub_schema)) |node| {
-                    if (node.isValidFast(instance, compiled)) |valid| {
-                        if (valid) return true;
-                    } else {
-                        return null; // can't inline this branch
-                    }
-                } else {
-                    return null; // unknown node
-                }
-            },
-            else => return true, // non-bool/object schema always validates
-        }
-    }
-    return false;
-}
-
-fn isAllOfValid(all_of_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    const sub_schemas = switch (all_of_val) {
-        .array => |a| a.items,
-        else => return null,
-    };
-    for (sub_schemas) |sub_schema| {
-        switch (sub_schema) {
-            .bool => |b| {
-                if (!b) return false;
-            },
-            .object => {
-                if (compiled.getNode(sub_schema)) |node| {
-                    if (node.isValidFast(instance, compiled)) |valid| {
-                        if (!valid) return false;
-                    } else {
-                        return null; // can't inline this branch
-                    }
-                } else {
-                    return null; // unknown node
-                }
-            },
-            else => {}, // non-bool/object schema always validates
-        }
-    }
-    return true;
-}
-
-fn isNotValid(not_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    switch (not_val) {
-        .bool => |b| return !b,
-        .object => {
-            if (compiled.getNode(not_val)) |node| {
-                if (node.isValidFast(instance, compiled)) |valid| {
-                    return !valid;
-                } else {
-                    return null; // can't inline
-                }
-            } else {
-                return null; // unknown node
-            }
+        .min_properties => |limit| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            return obj.count() >= limit;
         },
-        else => return null,
+        .max_properties => |limit| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            return obj.count() <= limit;
+        },
+        .generic => return null, // can't inline generic validators
     }
 }
 
@@ -411,9 +282,8 @@ fn getNumber(val: std.json.Value) ?f64 {
 
 const CmpOp = enum { gte, lte, gt, lt };
 
-fn numCmp(instance: std.json.Value, limit_val: std.json.Value, op: CmpOp) bool {
+fn numCmp(instance: std.json.Value, limit: f64, op: CmpOp) bool {
     const n = getNumber(instance) orelse return true;
-    const limit = getNumber(limit_val) orelse return true;
     return switch (op) {
         .gte => n >= limit,
         .lte => n <= limit,
@@ -422,46 +292,7 @@ fn numCmp(instance: std.json.Value, limit_val: std.json.Value, op: CmpOp) bool {
     };
 }
 
-const LenOp = enum { min, max };
-
-fn isLengthValid(instance: std.json.Value, limit_val: std.json.Value, op: LenOp) bool {
-    const s = switch (instance) {
-        .string => |str| str,
-        else => return true,
-    };
-    const limit = getUint(limit_val) orelse return true;
-    const len = std.unicode.utf8CountCodepoints(s) catch return true;
-    return switch (op) {
-        .min => len >= limit,
-        .max => len <= limit,
-    };
-}
-
-fn isItemCountValid(instance: std.json.Value, limit_val: std.json.Value, op: LenOp) bool {
-    const arr = switch (instance) {
-        .array => |a| a.items,
-        else => return true,
-    };
-    const limit = getUint(limit_val) orelse return true;
-    return switch (op) {
-        .min => arr.len >= limit,
-        .max => arr.len <= limit,
-    };
-}
-
-fn isPropCountValid(instance: std.json.Value, limit_val: std.json.Value, op: LenOp) bool {
-    const obj = switch (instance) {
-        .object => |o| o,
-        else => return true,
-    };
-    const limit = getUint(limit_val) orelse return true;
-    return switch (op) {
-        .min => obj.count() >= limit,
-        .max => obj.count() <= limit,
-    };
-}
-
-fn getUint(val: std.json.Value) ?usize {
+fn getUint(val: std.json.Value) ?u64 {
     return switch (val) {
         .integer => |n| if (n >= 0) @intCast(n) else null,
         .float => |f| if (f >= 0 and f == @trunc(f)) @intFromFloat(f) else null,
@@ -487,25 +318,15 @@ fn compileNode(
             if (node_map.get(key) != null) return;
 
             // Determine which validators are present and pre-extract their values
-            var entries = std.ArrayList(CompiledNode.ValidatorEntry).init(alloc);
+            var validators = std.ArrayList(CompiledValidator).init(alloc);
 
             const has_ref = obj.get("$ref") != null;
             const ref_overrides = has_ref and !is_2020;
 
             if (!ref_overrides) {
-                inline for (Validator.keyword_table) |entry| {
-                    const keyword_name = entry[0];
-                    const validator_fn = entry[1];
-                    if (obj.get(keyword_name)) |kw_val| {
-                        if (comptime Validator.isValidationKeyword(keyword_name)) {
-                            if (!validation_vocab_disabled) {
-                                entries.append(.{ .func = validator_fn, .keyword_value = kw_val }) catch {};
-                            }
-                        } else {
-                            entries.append(.{ .func = validator_fn, .keyword_value = kw_val }) catch {};
-                        }
-                    }
-                }
+                // Process keywords in the same order as keyword_table
+                // to maintain validation order consistency.
+                compileKeywords(alloc, obj, &validators, validation_vocab_disabled);
             }
             // If ref_overrides, we leave validators empty — validateAll will
             // call ref.validate directly anyway.  But we still record the node
@@ -517,7 +338,7 @@ fn compileNode(
             const needs_uri = obj.get("$id") != null or obj.get("$ref") != null;
             const node = alloc.create(CompiledNode) catch return;
             node.* = .{
-                .entries = entries.toOwnedSlice() catch &.{},
+                .validators = validators.toOwnedSlice() catch &.{},
                 .ref_overrides = ref_overrides,
                 .simple_type = simple_type,
                 .needs_uri_resolution = needs_uri,
@@ -535,6 +356,363 @@ fn compileNode(
         },
         else => {},
     }
+}
+
+/// Compile keywords from a schema object into CompiledValidator entries.
+/// Keywords are processed in the same order as the keyword_table to maintain
+/// validation order consistency.
+fn compileKeywords(
+    alloc: Allocator,
+    obj: std.json.ObjectMap,
+    validators: *std.ArrayList(CompiledValidator),
+    validation_vocab_disabled: bool,
+) void {
+    // Type checking
+    if (obj.get("type")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (compileType(alloc, kv)) |cv| {
+                validators.append(cv) catch {};
+            }
+        }
+    }
+    if (obj.get("enum")) |kv| {
+        if (!validation_vocab_disabled) {
+            validators.append(.{ .enum_check = kv }) catch {};
+        }
+    }
+    if (obj.get("const")) |kv| {
+        if (!validation_vocab_disabled) {
+            validators.append(.{ .const_check = kv }) catch {};
+        }
+    }
+
+    // Numeric
+    if (obj.get("minimum")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getNumber(kv)) |limit| {
+                validators.append(.{ .minimum = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("maximum")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getNumber(kv)) |limit| {
+                validators.append(.{ .maximum = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("exclusiveMinimum")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getNumber(kv)) |limit| {
+                validators.append(.{ .exclusive_minimum = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("exclusiveMaximum")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getNumber(kv)) |limit| {
+                validators.append(.{ .exclusive_maximum = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("multipleOf")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getNumber(kv)) |divisor| {
+                validators.append(.{ .multiple_of = divisor }) catch {};
+            }
+        }
+    }
+
+    // String
+    if (obj.get("minLength")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getUint(kv)) |limit| {
+                validators.append(.{ .min_length = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("maxLength")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getUint(kv)) |limit| {
+                validators.append(.{ .max_length = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("pattern")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/pattern.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "pattern",
+        } }) catch {};
+    }
+
+    // Array
+    if (obj.get("prefixItems")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/prefix_items.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "prefixItems",
+        } }) catch {};
+    }
+    if (obj.get("items")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/items.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "items",
+        } }) catch {};
+    }
+    if (obj.get("additionalItems")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/additional_items.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "additionalItems",
+        } }) catch {};
+    }
+    if (obj.get("minItems")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getUint(kv)) |limit| {
+                validators.append(.{ .min_items = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("maxItems")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getUint(kv)) |limit| {
+                validators.append(.{ .max_items = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("uniqueItems")) |kv| {
+        if (!validation_vocab_disabled) {
+            // Only add if uniqueItems is true
+            switch (kv) {
+                .bool => |b| {
+                    if (b) {
+                        validators.append(.{ .generic = .{
+                            .func = @import("keywords/unique_items.zig").validate,
+                            .keyword_value = kv,
+                            .keyword_name = "uniqueItems",
+                        } }) catch {};
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+    if (obj.get("contains")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/contains.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "contains",
+        } }) catch {};
+    }
+
+    // Object
+    if (obj.get("properties")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/properties.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "properties",
+        } }) catch {};
+    }
+    if (obj.get("required")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (compileRequired(alloc, kv)) |names| {
+                validators.append(.{ .required = names }) catch {};
+            }
+        }
+    }
+    if (obj.get("additionalProperties")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/additional_properties.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "additionalProperties",
+        } }) catch {};
+    }
+    if (obj.get("patternProperties")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/pattern_properties.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "patternProperties",
+        } }) catch {};
+    }
+    if (obj.get("minProperties")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getUint(kv)) |limit| {
+                validators.append(.{ .min_properties = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("maxProperties")) |kv| {
+        if (!validation_vocab_disabled) {
+            if (getUint(kv)) |limit| {
+                validators.append(.{ .max_properties = limit }) catch {};
+            }
+        }
+    }
+    if (obj.get("propertyNames")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/property_names.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "propertyNames",
+        } }) catch {};
+    }
+    if (obj.get("dependencies")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/dependencies.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "dependencies",
+        } }) catch {};
+    }
+    if (obj.get("dependentRequired")) |kv| {
+        if (!validation_vocab_disabled) {
+            validators.append(.{ .generic = .{
+                .func = @import("keywords/dependent_required.zig").validate,
+                .keyword_value = kv,
+                .keyword_name = "dependentRequired",
+            } }) catch {};
+        }
+    }
+    if (obj.get("dependentSchemas")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/dependent_schemas.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "dependentSchemas",
+        } }) catch {};
+    }
+
+    // Logical composition
+    if (obj.get("allOf")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/all_of.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "allOf",
+        } }) catch {};
+    }
+    if (obj.get("anyOf")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/any_of.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "anyOf",
+        } }) catch {};
+    }
+    if (obj.get("oneOf")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/one_of.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "oneOf",
+        } }) catch {};
+    }
+    if (obj.get("not")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/not_keyword.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "not",
+        } }) catch {};
+    }
+
+    // Reference
+    if (obj.get("$ref")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/ref.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "$ref",
+        } }) catch {};
+    }
+    if (obj.get("$dynamicRef")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/dynamic_ref.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "$dynamicRef",
+        } }) catch {};
+    }
+
+    // Conditional
+    if (obj.get("if")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/if_then_else.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "if",
+        } }) catch {};
+    }
+
+    // Unevaluated (must be last — depends on other keywords' evaluations)
+    if (obj.get("unevaluatedProperties")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/unevaluated_properties.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "unevaluatedProperties",
+        } }) catch {};
+    }
+    if (obj.get("unevaluatedItems")) |kv| {
+        validators.append(.{ .generic = .{
+            .func = @import("keywords/unevaluated_items.zig").validate,
+            .keyword_value = kv,
+            .keyword_name = "unevaluatedItems",
+        } }) catch {};
+    }
+}
+
+/// Compile a "type" keyword value into a CompiledValidator.
+fn compileType(alloc: Allocator, type_val: std.json.Value) ?CompiledValidator {
+    switch (type_val) {
+        .string => |s| {
+            const st = detectSimpleTypeFromString(s);
+            if (st != .none) return .{ .type_single = st };
+            return null;
+        },
+        .array => |arr| {
+            var types = std.ArrayList(SimpleType).init(alloc);
+            for (arr.items) |item| {
+                switch (item) {
+                    .string => |s| {
+                        const st = detectSimpleTypeFromString(s);
+                        if (st != .none) {
+                            types.append(st) catch {};
+                        }
+                    },
+                    else => {},
+                }
+            }
+            if (types.items.len > 0) {
+                return .{ .type_multi = types.toOwnedSlice() catch &.{} };
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+/// Compile a "required" keyword value into a pre-extracted string slice.
+fn compileRequired(alloc: Allocator, req_val: std.json.Value) ?[]const []const u8 {
+    const arr = switch (req_val) {
+        .array => |a| a.items,
+        else => return null,
+    };
+    var names = std.ArrayList([]const u8).init(alloc);
+    for (arr) |item| {
+        switch (item) {
+            .string => |s| {
+                names.append(s) catch {};
+            },
+            else => {},
+        }
+    }
+    if (names.items.len > 0) {
+        return names.toOwnedSlice() catch null;
+    }
+    return null;
+}
+
+fn detectSimpleTypeFromString(t: []const u8) SimpleType {
+    if (std.mem.eql(u8, t, "null")) return .null;
+    if (std.mem.eql(u8, t, "boolean")) return .boolean;
+    if (std.mem.eql(u8, t, "integer")) return .integer;
+    if (std.mem.eql(u8, t, "number")) return .number;
+    if (std.mem.eql(u8, t, "string")) return .string;
+    if (std.mem.eql(u8, t, "array")) return .array;
+    if (std.mem.eql(u8, t, "object")) return .object;
+    return .none;
 }
 
 /// Recurse into known sub-schema positions within a schema object.
@@ -704,7 +882,7 @@ test "compile empty schema" {
     // Empty schema should have a node with 0 validators
     const node = compiled.getNode(parsed.value);
     try std.testing.expect(node != null);
-    try std.testing.expectEqual(@as(usize, 0), node.?.entries.len);
+    try std.testing.expectEqual(@as(usize, 0), node.?.validators.len);
 }
 
 test "compile schema with type keyword" {
@@ -720,7 +898,7 @@ test "compile schema with type keyword" {
 
     const node = compiled.getNode(parsed.value);
     try std.testing.expect(node != null);
-    try std.testing.expectEqual(@as(usize, 1), node.?.entries.len);
+    try std.testing.expectEqual(@as(usize, 1), node.?.validators.len);
 }
 
 test "compile schema with properties recurses" {
@@ -737,14 +915,14 @@ test "compile schema with properties recurses" {
     // Root node: type + properties = 2 validators
     const root_node = compiled.getNode(parsed.value);
     try std.testing.expect(root_node != null);
-    try std.testing.expectEqual(@as(usize, 2), root_node.?.entries.len);
+    try std.testing.expectEqual(@as(usize, 2), root_node.?.validators.len);
 
     // Sub-schema {"type": "string"} should also be compiled
     const props = parsed.value.object.get("properties").?.object;
     const name_schema_val = props.get("name").?;
     const name_node = compiled.getNode(name_schema_val);
     try std.testing.expect(name_node != null);
-    try std.testing.expectEqual(@as(usize, 1), name_node.?.entries.len);
+    try std.testing.expectEqual(@as(usize, 1), name_node.?.validators.len);
 }
 
 test "compiled validation produces correct results" {
