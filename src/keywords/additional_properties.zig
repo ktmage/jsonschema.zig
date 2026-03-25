@@ -39,7 +39,7 @@ pub fn validate(ctx: Context) void {
 
         // Check if property is covered by "patternProperties"
         if (pattern_props) |pp| {
-            if (pattern_properties.matchesAnyPattern(ctx.allocator, prop_name, pp, ctx.regex_cache)) continue;
+            if (pattern_properties.matchesAnyPattern(ctx.allocator, prop_name, pp)) continue;
         }
 
         // This is an additional property

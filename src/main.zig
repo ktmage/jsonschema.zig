@@ -5,7 +5,6 @@ pub const JsonPointer = @import("json_pointer.zig");
 pub const Validator = @import("validator.zig");
 pub const SchemaRegistry = @import("schema_registry.zig").SchemaRegistry;
 const schema_registry_mod = @import("schema_registry.zig");
-pub const RegexCache = @import("regex_cache.zig").RegexCache;
 
 pub const ValidationError = struct {
     instance_path: []const u8,
@@ -31,122 +30,6 @@ pub const ValidationResult = struct {
         self.allocator.free(self.errors);
     }
 };
-
-/// Fast boolean-only validation (no error details).
-pub fn isValid(
-    allocator: Allocator,
-    schema: std.json.Value,
-    instance: std.json.Value,
-) bool {
-    return isValidFull(allocator, schema, schema, instance, null, "", null);
-}
-
-/// Fast boolean-only validation with registry support.
-pub fn isValidWithRegistry(
-    allocator: Allocator,
-    schema: std.json.Value,
-    instance: std.json.Value,
-    registry: *SchemaRegistry,
-) bool {
-    var dynamic_scope = std.ArrayList(Validator.DynamicScopeEntry).init(allocator);
-    defer dynamic_scope.deinit();
-    const root_base = blk: {
-        const obj = switch (schema) {
-            .object => |o| o,
-            else => break :blk @as([]const u8, ""),
-        };
-        const id_val = obj.get("$id") orelse break :blk @as([]const u8, "");
-        break :blk switch (id_val) {
-            .string => |s| s,
-            else => @as([]const u8, ""),
-        };
-    };
-    dynamic_scope.append(.{ .base_uri = root_base, .schema = schema }) catch {};
-    return isValidFull(allocator, schema, schema, instance, registry, "", &dynamic_scope);
-}
-
-/// Full boolean-only validation (no error construction, early exit on first failure).
-pub fn isValidFull(
-    allocator: Allocator,
-    root_schema: std.json.Value,
-    schema: std.json.Value,
-    instance: std.json.Value,
-    registry: ?*SchemaRegistry,
-    parent_base_uri: []const u8,
-    dynamic_scope: ?*std.ArrayList(Validator.DynamicScopeEntry),
-) bool {
-    switch (schema) {
-        .bool => |b| return b,
-        .object => {},
-        else => return true,
-    }
-
-    // Determine base URI (same logic as validateFull)
-    const has_ref = schema.object.get("$ref") != null;
-    const is_2020 = isDraft2020(root_schema);
-    const base_uri = blk: {
-        if (schema.object.get("$id")) |id_val| {
-            if (asString(id_val)) |id_str| {
-                if (id_str.len > 0 and id_str[0] != '#') {
-                    if (registry) |reg| {
-                        const pbu_stripped = schema_registry_mod.stripFragment(parent_base_uri);
-                        if (reg.schemas.get(pbu_stripped)) |registered| {
-                            if (registered.object.keys().ptr == schema.object.keys().ptr) {
-                                break :blk parent_base_uri;
-                            }
-                        }
-                    }
-                    break :blk schema_registry_mod.resolveUri(allocator, parent_base_uri, id_str);
-                }
-            }
-        }
-        break :blk parent_base_uri;
-    };
-
-    const ref_base_uri = if (has_ref and !is_2020) parent_base_uri else base_uri;
-
-    // Track dynamic scope
-    const has_new_scope = schema.object.get("$id") != null;
-    if (dynamic_scope) |ds| {
-        if (has_new_scope) {
-            ds.append(.{ .base_uri = base_uri, .schema = schema }) catch {};
-        }
-    }
-    defer {
-        if (dynamic_scope) |ds| {
-            if (has_new_scope and ds.items.len > 0) {
-                _ = ds.pop();
-            }
-        }
-    }
-
-    var errors = std.ArrayList(ValidationError).init(allocator);
-    defer {
-        // No need to free individual error strings since valid_only mode doesn't allocate them
-        errors.deinit();
-    }
-
-    const ctx = Validator.Context{
-        .allocator = allocator,
-        .root_schema = root_schema,
-        .schema = schema,
-        .instance = instance,
-        .instance_path = "",
-        .schema_path = "",
-        .errors = &errors,
-        .registry = registry,
-        .base_uri = base_uri,
-        .ref_base_uri = ref_base_uri,
-        .dynamic_scope = dynamic_scope,
-        .valid_only = true,
-        .is_draft_2020 = is_2020,
-        .regex_cache = if (registry) |reg| &reg.regex_cache else null,
-    };
-
-    Validator.validateAll(ctx);
-
-    return errors.items.len == 0;
-}
 
 pub fn validate(
     allocator: Allocator,
@@ -292,8 +175,6 @@ pub fn validateFull(
         .base_uri = base_uri,
         .ref_base_uri = ref_base_uri,
         .dynamic_scope = dynamic_scope,
-        .is_draft_2020 = is_2020,
-        .regex_cache = if (registry) |reg| &reg.regex_cache else null,
     };
 
     Validator.validateAll(ctx);

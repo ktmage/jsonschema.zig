@@ -128,7 +128,9 @@ fn collectEvaluatedItems(
     // contains evaluates matching indices
     if (obj.get("contains")) |contains_schema| {
         for (arr.items, 0..) |item, i| {
-            if (ctx.isSubschemaValid(contains_schema, item)) {
+            const result = ctx.validateSubschema(contains_schema, item, ctx.instance_path, ctx.schema_path);
+            defer result.deinit();
+            if (result.isValid()) {
                 evaluated_indices.put(i, {}) catch {};
             }
         }
@@ -217,7 +219,9 @@ fn collectEvaluatedItems(
 }
 
 fn subschemaValid(ctx: Context, sub_schema: std.json.Value, instance: std.json.Value) bool {
-    return ctx.isSubschemaValid(sub_schema, instance);
+    const result = ctx.validateSubschema(sub_schema, instance, ctx.instance_path, ctx.schema_path);
+    defer result.deinit();
+    return result.isValid();
 }
 
 fn resolveRef(ctx: Context, ref_str: []const u8) ?std.json.Value {
