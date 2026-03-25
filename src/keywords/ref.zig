@@ -52,8 +52,9 @@ pub fn validate(ctx: Context) void {
             // push that resource's root to the dynamic scope
             const pushed_scope = pushResourceScope(ctx, res.root, res.base_uri);
 
-            // Fast path: if resolved to the same root and compiled is available, use fast sub-validation
-            if (ctx.compiled != null and res.root.object.keys().ptr == ctx.root_schema.object.keys().ptr) {
+            // Fast path: if resolved to the same root and compiled is available,
+            // AND base URI hasn't changed, use fast sub-validation.
+            if (ctx.compiled != null and res.root.object.keys().ptr == ctx.root_schema.object.keys().ptr and std.mem.eql(u8, res.base_uri, ctx.base_uri)) {
                 const result = ctx.validateSubschema(res.schema, ctx.instance, ctx.instance_path, schema_path);
                 defer result.deinit();
 

@@ -180,6 +180,18 @@ fn isEntryValid(entry: CompiledNode.ValidatorEntry, instance: std.json.Value, co
     if (func == @import("keywords/additional_properties.zig").validate) {
         return null; // too complex to inline
     }
+    if (func == @import("keywords/one_of.zig").validate) {
+        return isOneOfValid(kv, instance, compiled);
+    }
+    if (func == @import("keywords/any_of.zig").validate) {
+        return isAnyOfValid(kv, instance, compiled);
+    }
+    if (func == @import("keywords/all_of.zig").validate) {
+        return isAllOfValid(kv, instance, compiled);
+    }
+    if (func == @import("keywords/not_keyword.zig").validate) {
+        return isNotValid(kv, instance, compiled);
+    }
 
     // Unknown keyword — can't inline, signal caller to use full path
     return null;
@@ -272,6 +284,118 @@ fn isItemsValid(instance: std.json.Value, items_val: std.json.Value, compiled: *
         },
         .bool => |b| return b or arr.len == 0,
         else => return true,
+    }
+}
+
+fn isOneOfValid(one_of_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const sub_schemas = switch (one_of_val) {
+        .array => |a| a.items,
+        else => return null,
+    };
+    var match_count: usize = 0;
+    for (sub_schemas) |sub_schema| {
+        // Use couldMatch pre-check from one_of.zig
+        if (!@import("keywords/one_of.zig").couldMatch(sub_schema, instance)) continue;
+
+        switch (sub_schema) {
+            .bool => |b| {
+                if (b) {
+                    match_count += 1;
+                    if (match_count > 1) return false;
+                }
+            },
+            .object => {
+                if (compiled.getNode(sub_schema)) |node| {
+                    if (node.isValidFast(instance, compiled)) |valid| {
+                        if (valid) {
+                            match_count += 1;
+                            if (match_count > 1) return false;
+                        }
+                    } else {
+                        return null; // can't inline this branch
+                    }
+                } else {
+                    return null; // unknown node
+                }
+            },
+            else => {
+                match_count += 1;
+                if (match_count > 1) return false;
+            },
+        }
+    }
+    return match_count == 1;
+}
+
+fn isAnyOfValid(any_of_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const sub_schemas = switch (any_of_val) {
+        .array => |a| a.items,
+        else => return null,
+    };
+    for (sub_schemas) |sub_schema| {
+        switch (sub_schema) {
+            .bool => |b| {
+                if (b) return true;
+            },
+            .object => {
+                if (compiled.getNode(sub_schema)) |node| {
+                    if (node.isValidFast(instance, compiled)) |valid| {
+                        if (valid) return true;
+                    } else {
+                        return null; // can't inline this branch
+                    }
+                } else {
+                    return null; // unknown node
+                }
+            },
+            else => return true, // non-bool/object schema always validates
+        }
+    }
+    return false;
+}
+
+fn isAllOfValid(all_of_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const sub_schemas = switch (all_of_val) {
+        .array => |a| a.items,
+        else => return null,
+    };
+    for (sub_schemas) |sub_schema| {
+        switch (sub_schema) {
+            .bool => |b| {
+                if (!b) return false;
+            },
+            .object => {
+                if (compiled.getNode(sub_schema)) |node| {
+                    if (node.isValidFast(instance, compiled)) |valid| {
+                        if (!valid) return false;
+                    } else {
+                        return null; // can't inline this branch
+                    }
+                } else {
+                    return null; // unknown node
+                }
+            },
+            else => {}, // non-bool/object schema always validates
+        }
+    }
+    return true;
+}
+
+fn isNotValid(not_val: std.json.Value, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    switch (not_val) {
+        .bool => |b| return !b,
+        .object => {
+            if (compiled.getNode(not_val)) |node| {
+                if (node.isValidFast(instance, compiled)) |valid| {
+                    return !valid;
+                } else {
+                    return null; // can't inline
+                }
+            } else {
+                return null; // unknown node
+            }
+        },
+        else => return null,
     }
 }
 

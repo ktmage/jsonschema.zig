@@ -5,7 +5,7 @@ const JsonPointer = @import("../json_pointer.zig");
 
 /// Quick check: can this instance possibly match the sub-schema based on
 /// type/enum constraints? Returns false if definitely not, true if maybe.
-fn couldMatch(sub_schema: std.json.Value, instance: std.json.Value) bool {
+pub fn couldMatch(sub_schema: std.json.Value, instance: std.json.Value) bool {
     const obj = switch (sub_schema) {
         .object => |o| o,
         else => return true,

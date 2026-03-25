@@ -1,6 +1,7 @@
 const std = @import("std");
 const jsonschema = @import("main.zig");
 const SchemaRegistry = jsonschema.SchemaRegistry;
+const CompiledSchema = jsonschema.CompiledSchema;
 const build_options = @import("build_options");
 
 fn runTestFile(
@@ -261,4 +262,109 @@ test "JSON Schema Test Suite — Draft 2020-12" {
     );
 
     try std.testing.expect(file_count > 0);
+}
+
+test "compiled path matches uncompiled path — Draft 7" {
+    const allocator = std.testing.allocator;
+    const path = build_options.test_suite_path;
+    const remotes_path = build_options.remotes_path;
+
+    // Load remote schemas
+    var remotes_arena = std.heap.ArenaAllocator.init(allocator);
+    defer remotes_arena.deinit();
+    const remotes_alloc = remotes_arena.allocator();
+
+    var remotes_registry = SchemaRegistry.init(remotes_alloc);
+    var parsed_remotes = std.ArrayList(std.json.Parsed(std.json.Value)).init(remotes_alloc);
+
+    var remotes_dir = try std.fs.openDirAbsolute(remotes_path, .{ .iterate = true });
+    defer remotes_dir.close();
+    loadRemotes(remotes_alloc, &remotes_registry, remotes_dir, "", &parsed_remotes);
+
+    // Run test files
+    var dir = try std.fs.openDirAbsolute(path, .{ .iterate = true });
+    defer dir.close();
+
+    var total_tests: usize = 0;
+    var mismatches: usize = 0;
+    var file_count: usize = 0;
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+
+        const contents = dir.readFileAlloc(allocator, entry.name, 10 * 1024 * 1024) catch |err| {
+            std.debug.print("Failed to read {s}: {}\n", .{ entry.name, err });
+            continue;
+        };
+        defer allocator.free(contents);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, contents, .{}) catch |err| {
+            std.debug.print("Failed to parse {s}: {}\n", .{ entry.name, err });
+            continue;
+        };
+        defer parsed.deinit();
+
+        const test_groups = parsed.value.array.items;
+
+        for (test_groups) |group| {
+            const group_obj = group.object;
+            const schema = group_obj.get("schema") orelse continue;
+            const tests_val = group_obj.get("tests") orelse continue;
+
+            for (tests_val.array.items) |t| {
+                const test_obj = t.object;
+                const instance = test_obj.get("data") orelse continue;
+                _ = (test_obj.get("valid") orelse continue).bool;
+
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const alloc = arena.allocator();
+
+                // Build a per-test registry with remotes
+                var registry = SchemaRegistry.init(alloc);
+                var remote_it = remotes_registry.schemas.iterator();
+                while (remote_it.next()) |re| {
+                    registry.addSchema(re.key_ptr.*, re.value_ptr.*);
+                }
+                const base_uri = getSchemaId(schema) orelse "";
+                if (base_uri.len > 0) {
+                    registry.addSchema(base_uri, schema);
+                }
+                registry.scanIds(base_uri, schema);
+
+                // Uncompiled path
+                const uncompiled_result = jsonschema.validateWithRegistry(alloc, schema, instance, &registry);
+                const uncompiled_valid = uncompiled_result.isValid();
+
+                // Compiled path
+                var compiled = CompiledSchema.compile(alloc, schema, &registry);
+                defer compiled.deinit();
+                const compiled_result = jsonschema.validateCompiledWithRegistry(alloc, &compiled, instance, &registry);
+                const compiled_valid = compiled_result.isValid();
+
+                if (uncompiled_valid != compiled_valid) {
+                    const group_desc = getDesc(group_obj);
+                    const test_desc = getDesc(test_obj);
+                    std.debug.print("  compiled path mismatch [{s}] {s} > {s} (uncompiled={}, compiled={})\n", .{
+                        entry.name, group_desc, test_desc, uncompiled_valid, compiled_valid,
+                    });
+                    mismatches += 1;
+                }
+                total_tests += 1;
+            }
+        }
+        file_count += 1;
+    }
+
+    std.debug.print(
+        "\n=== compiled path vs uncompiled path (Draft 7) ===\n" ++
+            "Files:      {d}\n" ++
+            "Tests:      {d}\n" ++
+            "Mismatches: {d}\n\n",
+        .{ file_count, total_tests, mismatches },
+    );
+
+    try std.testing.expect(file_count > 0);
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
 }
