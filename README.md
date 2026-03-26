@@ -1,5 +1,7 @@
 # jsonschema.zig
 
+> **Note**: This is an experimental implementation built entirely with [Claude Code](https://claude.ai/claude-code). The code, tests, optimizations, and this README were all generated through AI-human collaboration.
+
 A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant**, zero external dependencies, and built for performance.
 
 - **Full specification coverage**: Draft 7 (920/920 tests) and Draft 2020-12 (1142/1142 tests) with 100% pass rate against the official [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
