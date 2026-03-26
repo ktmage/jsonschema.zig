@@ -27,7 +27,9 @@ pub fn validate(ctx: Context) void {
         if (instance_obj.get(prop_name) == null) continue;
 
         // Fast path: skip path allocation for valid schema dependencies
-        if (ctx.compiled != null and ctx.isSubschemaValid(dep_schema, ctx.instance)) continue;
+        if (ctx.compiled != null and ctx.isSubschemaValid(dep_schema, ctx.instance)) {
+            continue;
+        }
 
         const dep_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, prop_name);
 
