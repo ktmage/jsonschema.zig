@@ -60,6 +60,10 @@ pub const CompiledSchema = struct {
         // into sub-schemas, so child nodes are available for pre-linking.
         compileNode(alloc, schema, &node_map, is_2020, validation_vocab_disabled);
 
+        // Post-process: selectively disable needs_uri_resolution for nodes
+        // whose $ref targets are fully inlinable by isValidFast.
+        optimizeRefResolution(schema, &node_map);
+
         // Pre-resolve all local $ref targets to avoid JSON pointer walks at runtime.
         var local_ref_cache = std.StringHashMap(std.json.Value).init(alloc);
         buildLocalRefCache(schema, schema, &local_ref_cache);
@@ -420,6 +424,64 @@ fn getUint(val: std.json.Value) ?u64 {
 /// Check if a linked schema's isValidFast is guaranteed to not return null
 /// at the immediate level (no .generic, .pattern, .unique_items, .contains).
 /// This is a 1-level check — deeper pre-linked variants may still return null.
+/// Post-process pass: for nodes with $ref (needs_uri_resolution=true),
+/// check if the $ref target is fully inlinable. If so, set needs_uri_resolution=false
+/// so isValidFast can be called on this node (delegating to the target via pre-linked validators).
+fn optimizeRefResolution(root_schema: std.json.Value, node_map: *const CompiledSchema.NodeMap) void {
+    const schema_reg = @import("schema_registry.zig");
+    var it = node_map.iterator();
+    while (it.next()) |entry| {
+        const node = entry.value_ptr.*;
+        if (!node.needs_uri_resolution) continue;
+        // Find the original schema object to check for $ref and $id
+        // We can't easily get the schema from the node, so scan all validators
+        // for a .generic with keyword_name "$ref" — if present, it's a 2020-12 $ref
+        // For ref_overrides (Draft 7), the validators list is empty.
+        for (node.validators) |v| {
+            switch (v) {
+                .generic => |g| {
+                    if (g.keyword_name.ptr == "$ref".ptr) {
+                        // Try to resolve the $ref target
+                        const ref_str = switch (g.keyword_value) {
+                            .string => |s| s,
+                            else => continue,
+                        };
+                        if (ref_str.len >= 2 and ref_str[0] == '#' and ref_str[1] == '/') {
+                            if (schema_reg.resolvePointer(root_schema, ref_str[2..])) |resolved| {
+                                if (resolved == .object) {
+                                    if (node_map.get(@intFromPtr(resolved.object.keys().ptr))) |target| {
+                                        if (isNodeFullyInlinable(target)) {
+                                            node.needs_uri_resolution = false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+}
+
+/// Check if a node's isValidFast is guaranteed to never return null.
+/// Only checks the immediate level (1-deep) — pre-linked variants
+/// that recurse into sub-schemas may still return null at deeper levels.
+fn isNodeFullyInlinable(node: *const CompiledNode) bool {
+    if (node.needs_uri_resolution) return false;
+    if (node.ref_overrides) return false;
+    if (node.simple_type != .none) return true;
+    for (node.validators) |v| {
+        switch (v) {
+            .generic, .pattern, .unique_items, .contains => return false,
+            else => {},
+        }
+    }
+    if (node.unevaluated_ceiling != null) return false; // has unevaluatedProperties
+    return true;
+}
+
 fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     if (ls.node) |node| {
         if (node.needs_uri_resolution) return null;
