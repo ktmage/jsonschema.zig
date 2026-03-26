@@ -120,6 +120,7 @@ pub fn validate(ctx: Context) void {
     };
 
     var match_count: usize = 0;
+    var matching_schema: ?std.json.Value = null;
 
     for (sub_schemas) |sub_schema| {
         // Quick pre-check: skip sub-schemas that can't possibly match
@@ -127,6 +128,7 @@ pub fn validate(ctx: Context) void {
 
         if (ctx.isSubschemaValid(sub_schema, ctx.instance)) {
             match_count += 1;
+            matching_schema = sub_schema;
             if (match_count > 1) break;
         }
     }

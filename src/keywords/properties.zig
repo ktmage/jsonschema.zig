@@ -23,6 +23,11 @@ pub fn validate(ctx: Context) void {
 
         const instance_value = instance_obj.get(prop_name) orelse continue;
 
+        // Track evaluated property for unevaluatedProperties
+        if (ctx.evaluated_props) |ep| {
+            ep.put(prop_name, {}) catch {};
+        }
+
         // Fast path: try zero-allocation isValidFast, fall back to isSubschemaValid
         if (ctx.compiled) |c| {
             const looked_up_node = c.getNode(prop_schema);

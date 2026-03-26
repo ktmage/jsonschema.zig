@@ -198,6 +198,8 @@ pub const CompiledNode = struct {
     simple_type: SimpleType = .none,
     /// True if this schema has $id or $ref — needs slow path for URI resolution.
     needs_uri_resolution: bool = false,
+    /// True if this schema has unevaluatedProperties keyword.
+    has_unevaluated_properties: bool = false,
     /// Pre-computed ceiling of property names that could be evaluated by any
     /// applicator branch. Non-null only when the schema has unevaluatedProperties.
     unevaluated_ceiling: ?[]const []const u8 = null,
@@ -500,6 +502,7 @@ fn compileNode(
                 .ref_overrides = ref_overrides,
                 .simple_type = detectSimpleType(obj),
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
+                .has_unevaluated_properties = obj.get("unevaluatedProperties") != null,
                 .unevaluated_ceiling = unevaluated_ceiling,
                 .unevaluated_all_covered = unevaluated_all_covered,
             };

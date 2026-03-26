@@ -52,6 +52,9 @@ pub const Context = struct {
     /// Pre-looked-up compiled node for the current schema.
     /// When set, validateAll skips the hashmap lookup entirely.
     compiled_node: ?*const compiled_mod.CompiledNode = null,
+    /// Tracked evaluated property names for unevaluatedProperties optimization.
+    /// Non-null only within nodes that have unevaluatedProperties.
+    evaluated_props: ?*std.StringHashMap(void) = null,
     /// Current keyword value, set by compiled dispatch to avoid re-lookup.
     current_keyword_value: ?std.json.Value = null,
 
@@ -242,6 +245,7 @@ pub const Context = struct {
 /// Keyword validator function signature.
 pub const KeywordValidator = *const fn (ctx: Context) void;
 
+
 /// Registry of keyword validators.
 /// Each keyword maps to a validation function.
 /// To add a new keyword, add an entry to this table and create the
@@ -376,6 +380,39 @@ pub fn validateAll(ctx: Context) void {
                     ctx.addError("type", "Instance does not match the expected type");
                 }
                 return;
+            }
+            // Start evaluated property tracking for unevaluatedProperties.
+            // The tracked set is a subset (from properties/additionalProperties only).
+            // If it covers all instance properties, collectEvaluatedProperties is skipped.
+            if (n.has_unevaluated_properties and ctx.evaluated_props == null and ctx.instance == .object) {
+                if (!n.unevaluated_all_covered) {
+                    var need_tracking = true;
+                    if (n.unevaluated_ceiling) |ceiling| {
+                        need_tracking = false;
+                        var inst_it = ctx.instance.object.iterator();
+                        while (inst_it.next()) |entry| {
+                            var found = false;
+                            for (ceiling) |name| {
+                                if (std.mem.eql(u8, entry.key_ptr.*, name)) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                need_tracking = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (need_tracking) {
+                        var evaluated = std.StringHashMap(void).init(ctx.allocator);
+                        defer evaluated.deinit();
+                        var tracked = ctx;
+                        tracked.evaluated_props = &evaluated;
+                        validateAll(tracked); // recurse with tracking enabled
+                        return;
+                    }
+                }
             }
             for (n.validators) |v| {
                 switch (v) {

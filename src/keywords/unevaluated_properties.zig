@@ -16,8 +16,7 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    // Fast path: use pre-computed static ceiling from compiled node.
-    // If ALL instance properties are in the ceiling set, no collectEvaluated needed.
+    // Fast path 1: ceiling check (compile-time pre-computed)
     if (ctx.compiled) |compiled| {
         if (compiled.getNode(ctx.schema)) |node| {
             if (node.unevaluated_all_covered) return;
@@ -40,6 +39,35 @@ pub fn validate(ctx: Context) void {
                 if (all_covered) return;
             }
         }
+    }
+
+    // Fast path 2: combine runtime tracked set (from properties/additionalProperties/
+    // patternProperties during this validation) with compile-time ceiling (from all
+    // applicator branches). If together they cover all instance properties, skip the
+    // expensive collectEvaluatedProperties tree walk.
+    if (ctx.evaluated_props) |ep| {
+        const ceiling = if (ctx.compiled) |comp| blk: {
+            break :blk if (comp.getNode(ctx.schema)) |cn| cn.unevaluated_ceiling else null;
+        } else null;
+        var all_covered = true;
+        var inst_it = instance_obj.iterator();
+        while (inst_it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (ep.get(name) != null) continue;
+            if (ceiling) |c| {
+                var in_ceil = false;
+                for (c) |cn| {
+                    if (std.mem.eql(u8, name, cn)) {
+                        in_ceil = true;
+                        break;
+                    }
+                }
+                if (in_ceil) continue;
+            }
+            all_covered = false;
+            break;
+        }
+        if (all_covered) return;
     }
 
     // Slow path: collect all evaluated property names

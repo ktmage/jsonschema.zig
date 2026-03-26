@@ -47,6 +47,10 @@ pub fn validate(ctx: Context) void {
             const prop_name_z = ctx.allocator.dupeZ(u8, prop_name) catch continue;
 
             if (c.regexec(&regex, prop_name_z.ptr, 0, null, 0) == 0) {
+                // Track evaluated property for unevaluatedProperties
+                if (ctx.evaluated_props) |ep| {
+                    ep.put(prop_name, {}) catch {};
+                }
                 // Fast path: skip path allocation for valid properties (node pre-looked-up)
                 if (ctx.compiled != null and ctx.isSubschemaValidWithNode(sub_schema, prop_value, sub_node)) continue;
 

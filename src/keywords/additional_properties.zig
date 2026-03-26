@@ -46,6 +46,11 @@ pub fn validate(ctx: Context) void {
             if (pattern_properties.matchesAnyPattern(ctx.allocator, prop_name, pp)) continue;
         }
 
+        // Track evaluated property for unevaluatedProperties
+        if (ctx.evaluated_props) |ep| {
+            ep.put(prop_name, {}) catch {};
+        }
+
         // This is an additional property
         switch (additional) {
             .bool => |b| {
