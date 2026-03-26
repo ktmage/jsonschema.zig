@@ -381,39 +381,6 @@ pub fn validateAll(ctx: Context) void {
                 }
                 return;
             }
-            // Start evaluated property tracking for unevaluatedProperties.
-            // The tracked set is a subset (from properties/additionalProperties only).
-            // If it covers all instance properties, collectEvaluatedProperties is skipped.
-            if (n.has_unevaluated_properties and ctx.evaluated_props == null and ctx.instance == .object) {
-                if (!n.unevaluated_all_covered) {
-                    var need_tracking = true;
-                    if (n.unevaluated_ceiling) |ceiling| {
-                        need_tracking = false;
-                        var inst_it = ctx.instance.object.iterator();
-                        while (inst_it.next()) |entry| {
-                            var found = false;
-                            for (ceiling) |name| {
-                                if (std.mem.eql(u8, entry.key_ptr.*, name)) {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found) {
-                                need_tracking = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (need_tracking) {
-                        var evaluated = std.StringHashMap(void).init(ctx.allocator);
-                        defer evaluated.deinit();
-                        var tracked = ctx;
-                        tracked.evaluated_props = &evaluated;
-                        validateAll(tracked); // recurse with tracking enabled
-                        return;
-                    }
-                }
-            }
             for (n.validators) |v| {
                 switch (v) {
                     .type_single => |st| {
