@@ -16,12 +16,36 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    // Collect all evaluated property names
+    // Fast path: use pre-computed static ceiling from compiled node.
+    // If ALL instance properties are in the ceiling set, no collectEvaluated needed.
+    if (ctx.compiled) |compiled| {
+        if (compiled.getNode(ctx.schema)) |node| {
+            if (node.unevaluated_all_covered) return;
+            if (node.unevaluated_ceiling) |ceiling| {
+                var all_covered = true;
+                var inst_it = instance_obj.iterator();
+                while (inst_it.next()) |entry| {
+                    var found = false;
+                    for (ceiling) |name| {
+                        if (std.mem.eql(u8, entry.key_ptr.*, name)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        all_covered = false;
+                        break;
+                    }
+                }
+                if (all_covered) return;
+            }
+        }
+    }
+
+    // Slow path: collect all evaluated property names
     var evaluated = std.StringHashMap(void).init(ctx.allocator);
     defer evaluated.deinit();
 
-    // Cache sub-schema validation results to avoid re-validating in applicators.
-    // (anyOf/oneOf/if check the same sub-schemas that were already validated.)
     var validation_cache = std.AutoHashMap(usize, bool).init(ctx.allocator);
     defer validation_cache.deinit();
     collectEvaluatedProperties(ctx, ctx.schema, ctx.instance, &evaluated, true, &validation_cache);

@@ -198,6 +198,12 @@ pub const CompiledNode = struct {
     simple_type: SimpleType = .none,
     /// True if this schema has $id or $ref — needs slow path for URI resolution.
     needs_uri_resolution: bool = false,
+    /// Pre-computed ceiling of property names that could be evaluated by any
+    /// applicator branch. Non-null only when the schema has unevaluatedProperties.
+    unevaluated_ceiling: ?[]const []const u8 = null,
+    /// True if additionalProperties (not false) exists anywhere in the schema
+    /// or allOf branches, meaning ALL properties are always evaluated.
+    unevaluated_all_covered: bool = false,
 
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
     /// Returns false on first failure. Only works for common keyword patterns;
@@ -473,12 +479,29 @@ fn compileNode(
                 compileKeywords(alloc, obj, &validators, validation_vocab_disabled, node_map);
             }
 
-            // 4. Fill in placeholder with actual data.
+            // 4. Pre-compute unevaluatedProperties ceiling if present.
+            var unevaluated_ceiling: ?[]const []const u8 = null;
+            var unevaluated_all_covered: bool = false;
+            if (obj.get("unevaluatedProperties") != null) {
+                var ceiling_set = std.StringHashMap(void).init(alloc);
+                var seen = std.AutoHashMap(usize, void).init(alloc);
+                unevaluated_all_covered = collectStaticCeiling(obj, &ceiling_set, schema, &seen);
+                var names = std.ArrayList([]const u8).init(alloc);
+                var ceil_it = ceiling_set.iterator();
+                while (ceil_it.next()) |entry| {
+                    names.append(entry.key_ptr.*) catch {};
+                }
+                unevaluated_ceiling = names.toOwnedSlice() catch &.{};
+            }
+
+            // 5. Fill in placeholder with actual data.
             node.* = .{
                 .validators = validators.toOwnedSlice() catch &.{},
                 .ref_overrides = ref_overrides,
                 .simple_type = detectSimpleType(obj),
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
+                .unevaluated_ceiling = unevaluated_ceiling,
+                .unevaluated_all_covered = unevaluated_all_covered,
             };
         },
         .array => |arr| {
@@ -981,6 +1004,102 @@ fn isAnnotationOnly(key: []const u8) bool {
         if (std.mem.eql(u8, key, a)) return true;
     }
     return false;
+}
+
+/// Recursively collect property names that could be evaluated by this schema
+/// and all its applicator sub-schemas. Returns true if ALL properties are
+/// covered (additionalProperties exists and is not false).
+fn collectStaticCeiling(
+    obj: std.json.ObjectMap,
+    ceiling: *std.StringHashMap(void),
+    root_schema: std.json.Value,
+    seen: *std.AutoHashMap(usize, void),
+) bool {
+    // additionalProperties (not false) means all extra properties are evaluated
+    if (obj.get("additionalProperties")) |ap| {
+        switch (ap) {
+            .bool => |b| {
+                if (b) return true;
+            },
+            .object => return true, // schema-valued additionalProperties evaluates all additional props
+            else => {},
+        }
+    }
+
+    // Collect from properties
+    if (obj.get("properties")) |props| {
+        if (props == .object) {
+            var it = props.object.iterator();
+            while (it.next()) |entry| {
+                ceiling.put(entry.key_ptr.*, {}) catch {};
+            }
+        }
+    }
+
+    const single_applicators = [_][]const u8{ "then", "else", "if" };
+    for (single_applicators) |keyword| {
+        if (obj.get(keyword)) |sub| {
+            if (collectStaticCeilingFromSchema(sub, ceiling, root_schema, seen)) return true;
+        }
+    }
+
+    const array_applicators = [_][]const u8{ "allOf", "anyOf", "oneOf" };
+    for (array_applicators) |keyword| {
+        if (obj.get(keyword)) |val| {
+            if (val == .array) {
+                for (val.array.items) |sub| {
+                    if (collectStaticCeilingFromSchema(sub, ceiling, root_schema, seen)) return true;
+                }
+            }
+        }
+    }
+
+    // $ref
+    if (obj.get("$ref")) |ref_val| {
+        if (ref_val == .string) {
+            const ref_str = ref_val.string;
+            if (ref_str.len > 0 and ref_str[0] == '#') {
+                var resolved: ?std.json.Value = null;
+                if (ref_str.len == 1) {
+                    resolved = root_schema;
+                } else if (ref_str.len >= 2 and ref_str[1] == '/') {
+                    resolved = @import("schema_registry.zig").resolvePointer(root_schema, ref_str[2..]);
+                }
+                if (resolved) |r| {
+                    if (collectStaticCeilingFromSchema(r, ceiling, root_schema, seen)) return true;
+                }
+            }
+        }
+    }
+
+    // dependentSchemas
+    if (obj.get("dependentSchemas")) |deps| {
+        if (deps == .object) {
+            var it = deps.object.iterator();
+            while (it.next()) |entry| {
+                if (collectStaticCeilingFromSchema(entry.value_ptr.*, ceiling, root_schema, seen)) return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+fn collectStaticCeilingFromSchema(
+    schema: std.json.Value,
+    ceiling: *std.StringHashMap(void),
+    root_schema: std.json.Value,
+    seen: *std.AutoHashMap(usize, void),
+) bool {
+    switch (schema) {
+        .object => |obj| {
+            const key = @intFromPtr(obj.keys().ptr);
+            if (seen.get(key) != null) return false;
+            seen.put(key, {}) catch return false;
+            return collectStaticCeiling(obj, ceiling, root_schema, seen);
+        },
+        else => return false,
+    }
 }
 
 /// Scan the schema tree for all $ref values and pre-resolve local fragment references.
