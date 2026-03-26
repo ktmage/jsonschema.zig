@@ -20,6 +20,9 @@ pub const CompiledSchema = struct {
     is_2020: bool,
     /// Whether the validation vocabulary is disabled (custom metaschema).
     validation_vocab_disabled: bool,
+    /// Pre-resolved local $ref targets (ref_string → resolved schema value).
+    /// Eliminates repeated JSON pointer walks at validation time.
+    local_ref_cache: std.StringHashMap(std.json.Value),
 
     const NodeMap = std.HashMap(
         usize,
@@ -57,12 +60,17 @@ pub const CompiledSchema = struct {
         // into sub-schemas, so child nodes are available for pre-linking.
         compileNode(alloc, schema, &node_map, is_2020, validation_vocab_disabled);
 
+        // Pre-resolve all local $ref targets to avoid JSON pointer walks at runtime.
+        var local_ref_cache = std.StringHashMap(std.json.Value).init(alloc);
+        buildLocalRefCache(schema, schema, &local_ref_cache);
+
         return .{
             .arena = arena,
             .node_map = node_map,
             .schema = schema,
             .is_2020 = is_2020,
             .validation_vocab_disabled = validation_vocab_disabled,
+            .local_ref_cache = local_ref_cache,
         };
     }
 
@@ -75,6 +83,20 @@ pub const CompiledSchema = struct {
         };
         const key = @intFromPtr(obj.keys().ptr);
         return self.node_map.get(key);
+    }
+
+    /// Resolve a local $ref string using the pre-computed cache.
+    /// Falls back to JSON pointer walk if not cached.
+    pub fn resolveLocalRef(self: *const CompiledSchema, ref_str: []const u8) ?std.json.Value {
+        return self.local_ref_cache.get(ref_str) orelse {
+            // Fallback: resolve via JSON pointer walk
+            if (ref_str.len == 0 or ref_str[0] != '#') return null;
+            if (ref_str.len == 1) return self.schema;
+            if (ref_str.len >= 2 and ref_str[1] == '/') {
+                return @import("schema_registry.zig").resolvePointer(self.schema, ref_str[2..]);
+            }
+            return null;
+        };
     }
 
     pub fn deinit(self: *CompiledSchema) void {
@@ -959,6 +981,42 @@ fn isAnnotationOnly(key: []const u8) bool {
         if (std.mem.eql(u8, key, a)) return true;
     }
     return false;
+}
+
+/// Scan the schema tree for all $ref values and pre-resolve local fragment references.
+fn buildLocalRefCache(
+    root: std.json.Value,
+    schema: std.json.Value,
+    cache: *std.StringHashMap(std.json.Value),
+) void {
+    switch (schema) {
+        .object => |obj| {
+            if (obj.get("$ref")) |ref_val| {
+                if (ref_val == .string) {
+                    const ref_str = ref_val.string;
+                    if (cache.get(ref_str) == null and ref_str.len > 0 and ref_str[0] == '#') {
+                        if (ref_str.len == 1) {
+                            cache.put(ref_str, root) catch {};
+                        } else if (ref_str.len >= 2 and ref_str[1] == '/') {
+                            if (@import("schema_registry.zig").resolvePointer(root, ref_str[2..])) |resolved| {
+                                cache.put(ref_str, resolved) catch {};
+                            }
+                        }
+                    }
+                }
+            }
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                buildLocalRefCache(root, entry.value_ptr.*, cache);
+            }
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                buildLocalRefCache(root, item, cache);
+            }
+        },
+        else => {},
+    }
 }
 
 fn getSchemaId(schema: std.json.Value) []const u8 {

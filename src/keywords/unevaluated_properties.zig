@@ -20,7 +20,11 @@ pub fn validate(ctx: Context) void {
     var evaluated = std.StringHashMap(void).init(ctx.allocator);
     defer evaluated.deinit();
 
-    collectEvaluatedProperties(ctx, ctx.schema, ctx.instance, &evaluated, true);
+    // Cache sub-schema validation results to avoid re-validating in applicators.
+    // (anyOf/oneOf/if check the same sub-schemas that were already validated.)
+    var validation_cache = std.AutoHashMap(usize, bool).init(ctx.allocator);
+    defer validation_cache.deinit();
+    collectEvaluatedProperties(ctx, ctx.schema, ctx.instance, &evaluated, true, &validation_cache);
 
     // Check unevaluated properties
     const unevaluated_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "unevaluatedProperties");
@@ -73,6 +77,7 @@ fn collectEvaluatedProperties(
     instance: std.json.Value,
     evaluated: *std.StringHashMap(void),
     is_root: bool,
+    validation_cache: *std.AutoHashMap(usize, bool),
 ) void {
     const obj = switch (schema) {
         .object => |o| o,
@@ -142,7 +147,7 @@ fn collectEvaluatedProperties(
     if (obj.get("allOf")) |all_of_val| {
         if (all_of_val == .array) {
             for (all_of_val.array.items) |sub_schema| {
-                collectEvaluatedProperties(ctx, sub_schema, instance, evaluated, false);
+                collectEvaluatedProperties(ctx, sub_schema, instance, evaluated, false, validation_cache);
             }
         }
     }
@@ -151,8 +156,8 @@ fn collectEvaluatedProperties(
     if (obj.get("anyOf")) |any_of_val| {
         if (any_of_val == .array) {
             for (any_of_val.array.items) |sub_schema| {
-                if (subschemaValid(ctx, sub_schema, instance)) {
-                    collectEvaluatedProperties(ctx, sub_schema, instance, evaluated, false);
+                if (subschemaValidCached(ctx, sub_schema, instance, validation_cache)) {
+                    collectEvaluatedProperties(ctx, sub_schema, instance, evaluated, false, validation_cache);
                 }
             }
         }
@@ -164,14 +169,14 @@ fn collectEvaluatedProperties(
             var match_count: usize = 0;
             var matching_schema: ?std.json.Value = null;
             for (one_of_val.array.items) |sub_schema| {
-                if (subschemaValid(ctx, sub_schema, instance)) {
+                if (subschemaValidCached(ctx, sub_schema, instance, validation_cache)) {
                     match_count += 1;
                     matching_schema = sub_schema;
                 }
             }
             if (match_count == 1) {
                 if (matching_schema) |ms| {
-                    collectEvaluatedProperties(ctx, ms, instance, evaluated, false);
+                    collectEvaluatedProperties(ctx, ms, instance, evaluated, false, validation_cache);
                 }
             }
         }
@@ -179,17 +184,15 @@ fn collectEvaluatedProperties(
 
     // if/then/else
     if (obj.get("if")) |if_schema| {
-        const if_valid = subschemaValid(ctx, if_schema, instance);
+        const if_valid = subschemaValidCached(ctx, if_schema, instance, validation_cache);
         if (if_valid) {
-            // When if passes, collect annotations from both if and then
-            collectEvaluatedProperties(ctx, if_schema, instance, evaluated, false);
+            collectEvaluatedProperties(ctx, if_schema, instance, evaluated, false, validation_cache);
             if (obj.get("then")) |then_schema| {
-                collectEvaluatedProperties(ctx, then_schema, instance, evaluated, false);
+                collectEvaluatedProperties(ctx, then_schema, instance, evaluated, false, validation_cache);
             }
         } else {
-            // When if fails, only collect from else (not from if)
             if (obj.get("else")) |else_schema| {
-                collectEvaluatedProperties(ctx, else_schema, instance, evaluated, false);
+                collectEvaluatedProperties(ctx, else_schema, instance, evaluated, false, validation_cache);
             }
         }
     }
@@ -198,7 +201,7 @@ fn collectEvaluatedProperties(
     if (obj.get("$ref")) |ref_val| {
         if (ref_val == .string) {
             if (resolveRef(ctx, ref_val.string)) |resolved| {
-                collectEvaluatedProperties(ctx, resolved, instance, evaluated, false);
+                collectEvaluatedProperties(ctx, resolved, instance, evaluated, false, validation_cache);
             }
         }
     }
@@ -207,7 +210,7 @@ fn collectEvaluatedProperties(
     if (obj.get("$dynamicRef")) |ref_val| {
         if (ref_val == .string) {
             if (resolveDynamicRef(ctx, ref_val.string)) |resolved| {
-                collectEvaluatedProperties(ctx, resolved, instance, evaluated, false);
+                collectEvaluatedProperties(ctx, resolved, instance, evaluated, false, validation_cache);
             }
         }
     }
@@ -218,8 +221,8 @@ fn collectEvaluatedProperties(
             var dep_it = deps_val.object.iterator();
             while (dep_it.next()) |entry| {
                 if (instance_obj.get(entry.key_ptr.*) != null) {
-                    if (subschemaValid(ctx, entry.value_ptr.*, instance)) {
-                        collectEvaluatedProperties(ctx, entry.value_ptr.*, instance, evaluated, false);
+                    if (subschemaValidCached(ctx, entry.value_ptr.*, instance, validation_cache)) {
+                        collectEvaluatedProperties(ctx, entry.value_ptr.*, instance, evaluated, false, validation_cache);
                     }
                 }
             }
@@ -229,8 +232,7 @@ fn collectEvaluatedProperties(
     // unevaluatedProperties itself: if it exists in a sub-schema (nested), treat it as evaluating too
     if (!is_root) {
         if (obj.get("unevaluatedProperties") != null) {
-            // Nested unevaluatedProperties: if the sub-schema passes, all properties are evaluated
-            if (subschemaValid(ctx, schema, instance)) {
+            if (subschemaValidCached(ctx, schema, instance, validation_cache)) {
                 addAllProperties(instance, evaluated);
             }
         }
@@ -248,8 +250,15 @@ fn addAllProperties(instance: std.json.Value, evaluated: *std.StringHashMap(void
     }
 }
 
-fn subschemaValid(ctx: Context, sub_schema: std.json.Value, instance: std.json.Value) bool {
-    return ctx.isSubschemaValid(sub_schema, instance);
+fn subschemaValidCached(ctx: Context, sub_schema: std.json.Value, instance: std.json.Value, cache: *std.AutoHashMap(usize, bool)) bool {
+    const key: usize = switch (sub_schema) {
+        .object => |o| @intFromPtr(o.keys().ptr),
+        else => return ctx.isSubschemaValid(sub_schema, instance),
+    };
+    if (cache.get(key)) |result| return result;
+    const result = ctx.isSubschemaValid(sub_schema, instance);
+    cache.put(key, result) catch {};
+    return result;
 }
 
 fn resolveRef(ctx: Context, ref_str: []const u8) ?std.json.Value {

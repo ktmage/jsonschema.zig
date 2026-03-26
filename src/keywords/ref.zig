@@ -21,15 +21,15 @@ pub fn validate(ctx: Context) void {
     const effective_base = ctx.ref_base_uri;
 
     // Fast path for compiled schemas with local fragment-only $ref (#/...)
-    // This avoids registry lookup and validateFull overhead entirely.
+    // Uses pre-resolved cache to avoid JSON pointer walks.
     if (ctx.compiled != null and ctx.registry == null) {
-        const resolved = resolveLocalRef(ctx, ref_str) orelse {
+        const cached = if (ctx.compiled) |c| c.resolveLocalRef(ref_str) else null;
+        const final_resolved = cached orelse resolveLocalRef(ctx, ref_str) orelse {
             ctx.addError("$ref", "could not resolve $ref");
             return;
         };
 
-        // Use the fast validateSubschema path (which skips validateFull when compiled)
-        const result = ctx.validateSubschema(resolved, ctx.instance, ctx.instance_path, schema_path);
+        const result = ctx.validateSubschema(final_resolved, ctx.instance, ctx.instance_path, schema_path);
         defer result.deinit();
 
         if (!result.isValid()) {
