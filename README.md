@@ -1,6 +1,6 @@
 # jsonschema.zig
 
-> **Note**: This is an experimental implementation built entirely with [Claude Code](https://claude.ai/claude-code). The code, tests, optimizations, and this README were all generated through AI-human collaboration.
+> **Note**: This is an experimental project where [Claude Code](https://claude.ai/claude-code) autonomously implemented nearly all of the code — from spec compliance and keyword logic to performance optimizations and this README itself. Human involvement was primarily direction and review.
 
 A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant**, zero external dependencies, and built for performance.
 
