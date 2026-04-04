@@ -1053,6 +1053,70 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("pattern", "String does not match pattern");
                         }
                     },
+                    .dependent_schemas_compiled => |deps| {
+                        const ds_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        for (deps) |dep| {
+                            if (ds_obj.get(dep.trigger) == null) continue;
+                            // Fast path
+                            if (dep.schema.node) |snode| {
+                                const can_skip = !snode.needs_uri_resolution or
+                                    (!snode.has_id and ctx.registry == null);
+                                if (can_skip) {
+                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                        if (result) continue;
+                                    }
+                                }
+                            }
+                            if (ctx.isSubschemaValidWithNode(dep.schema.value, ctx.instance, dep.schema.node)) continue;
+                            // Invalid — collect errors
+                            const base_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "dependentSchemas");
+                            const dep_path = @import("json_pointer.zig").appendProperty(ctx.allocator, base_path, dep.trigger);
+                            const result = ctx.validateSubschema(dep.schema.value, ctx.instance, ctx.instance_path, dep_path);
+                            defer result.deinit();
+                            if (!result.isValid()) {
+                                for (result.errors) |err| {
+                                    ctx.errors.append(.{
+                                        .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
+                                        .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
+                                        .keyword = err.keyword,
+                                        .message = ctx.allocator.dupe(u8, err.message) catch return,
+                                    }) catch return;
+                                }
+                            }
+                        }
+                    },
+                    .property_names_compiled => |ls| {
+                        const pn_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        // Fast path: try isValidFast on all property names
+                        if (ls.node) |pnode| {
+                            const can_skip = !pnode.needs_uri_resolution or
+                                (!pnode.has_id and ctx.registry == null);
+                            if (can_skip) {
+                                var all_ok = true;
+                                const pn_keys = pn_obj.keys();
+                                for (pn_keys) |key| {
+                                    const name_val = std.json.Value{ .string = key };
+                                    if (pnode.isValidFast(name_val, compiled)) |result| {
+                                        if (result) continue;
+                                    }
+                                    all_ok = false;
+                                    break;
+                                }
+                                if (all_ok) continue;
+                            }
+                        }
+                        // Slow path
+                        var child = ctx;
+                        child.current_keyword_value = null;
+                        child.compiled_node = null;
+                        @import("keywords/property_names.zig").validate(child);
+                    },
                     .unevaluated_properties_compiled => |up| {
                         // Fast path: ceiling check inline
                         if (up.all_covered) continue;

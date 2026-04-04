@@ -234,6 +234,12 @@ pub const CompiledValidator = union(enum) {
         all_covered: bool,
     },
 
+    // Compiled dependentSchemas: trigger property name → linked schema
+    dependent_schemas_compiled: []const DependentSchemaEntry,
+
+    // Compiled propertyNames: linked schema to validate property names against
+    property_names_compiled: LinkedSchema,
+
     // Pre-compiled regex pattern (stores pointer to arena-allocated CompiledRegex)
     pattern_compiled: *CompiledRegex,
 
@@ -276,6 +282,12 @@ pub const PatternPropertyEntry = struct {
     regex: *CompiledRegex,
     schema: LinkedSchema,
     pattern: []const u8,
+};
+
+/// Compiled dependentSchemas entry: trigger property + linked schema.
+pub const DependentSchemaEntry = struct {
+    trigger: []const u8,
+    schema: LinkedSchema,
 };
 
 /// Discriminator entry for oneOf optimization: maps a string value to a branch.
@@ -638,6 +650,38 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 return c.regexec(&cr.regex, ptr, 0, null, 0) == 0;
             }
             return null; // can't null-terminate without allocating
+        },
+        .dependent_schemas_compiled => |deps| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            for (deps) |dep| {
+                if (obj.get(dep.trigger) != null) {
+                    const result = validateLinkedSchema(dep.schema, instance, compiled) orelse return null;
+                    if (!result) return false;
+                }
+            }
+            return true;
+        },
+        .property_names_compiled => |ls| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            if (ls.node) |pnode| {
+                if (!pnode.needs_uri_resolution) {
+                    const keys = obj.keys();
+                    for (keys) |key| {
+                        const name_val = std.json.Value{ .string = key };
+                        if (pnode.isValidFast(name_val, compiled)) |result| {
+                            if (!result) return false;
+                        } else return null;
+                    }
+                    return true;
+                }
+            }
+            return null;
         },
         .unevaluated_properties_compiled => |up| {
             if (up.all_covered) return true;
@@ -1290,11 +1334,7 @@ fn compileKeywords(
         }
     }
     if (obj.get("propertyNames")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/property_names.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "propertyNames",
-        } }) catch {};
+        validators.append(.{ .property_names_compiled = linkSchema(node_map, kv) }) catch {};
     }
     if (obj.get("dependencies")) |kv| {
         validators.append(.{ .generic = .{
@@ -1313,11 +1353,20 @@ fn compileKeywords(
         }
     }
     if (obj.get("dependentSchemas")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/dependent_schemas.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "dependentSchemas",
-        } }) catch {};
+        switch (kv) {
+            .object => |deps_obj| {
+                var dep_entries = std.ArrayList(DependentSchemaEntry).init(alloc);
+                var deps_it = deps_obj.iterator();
+                while (deps_it.next()) |dep_entry| {
+                    dep_entries.append(.{
+                        .trigger = dep_entry.key_ptr.*,
+                        .schema = linkSchema(node_map, dep_entry.value_ptr.*),
+                    }) catch {};
+                }
+                validators.append(.{ .dependent_schemas_compiled = dep_entries.toOwnedSlice() catch &.{} }) catch {};
+            },
+            else => {},
+        }
     }
 
     // Logical composition
