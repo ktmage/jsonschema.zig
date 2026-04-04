@@ -493,36 +493,38 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 .object => |o| o,
                 else => return true,
             };
-            var it = obj.iterator();
-            while (it.next()) |entry| {
-                const prop_name = entry.key_ptr.*;
-                var found = false;
-                for (property_names) |name| {
-                    if (std.mem.eql(u8, prop_name, name)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) return false;
+            // Fast check: count instance properties covered by allowed names
+            // Uses hashmap lookup on the instance (O(1) per name) instead of
+            // iterating all instance properties with linear name search (O(M*N))
+            var covered: usize = 0;
+            for (property_names) |name| {
+                if (obj.get(name) != null) covered += 1;
             }
-            return true;
+            return obj.count() <= covered;
         },
         .additional_properties_schema => |ap| {
             const obj = switch (instance) {
                 .object => |o| o,
                 else => return true,
             };
+            // Fast check: if all properties are defined, no additional props to validate
+            var covered: usize = 0;
+            for (ap.property_names) |name| {
+                if (obj.get(name) != null) covered += 1;
+            }
+            if (obj.count() <= covered) return true;
+            // Has additional properties — validate each against schema
             var it = obj.iterator();
             while (it.next()) |entry| {
                 const prop_name = entry.key_ptr.*;
-                var covered = false;
+                var is_defined = false;
                 for (ap.property_names) |name| {
                     if (std.mem.eql(u8, prop_name, name)) {
-                        covered = true;
+                        is_defined = true;
                         break;
                     }
                 }
-                if (!covered) {
+                if (!is_defined) {
                     const result = validateLinkedSchema(ap.schema, entry.value_ptr.*, compiled) orelse return null;
                     if (!result) return false;
                 }

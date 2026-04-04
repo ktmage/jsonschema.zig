@@ -818,6 +818,13 @@ pub fn validateAll(ctx: Context) void {
                             .object => |o| o,
                             else => continue,
                         };
+                        // Fast check: count covered properties
+                        var covered: usize = 0;
+                        for (property_names) |name| {
+                            if (inst_obj.get(name) != null) covered += 1;
+                        }
+                        if (inst_obj.count() <= covered) continue;
+                        // Has additional properties — find and report them
                         var it = inst_obj.iterator();
                         while (it.next()) |entry| {
                             const prop_name = entry.key_ptr.*;
