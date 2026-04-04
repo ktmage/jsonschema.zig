@@ -5,6 +5,8 @@ const JsonPointer = @import("../json_pointer.zig");
 const jsonschema = @import("../main.zig");
 const schema_registry = @import("../schema_registry.zig");
 const pattern_properties = @import("pattern_properties.zig");
+const compiled_mod = @import("../compiled.zig");
+const c_regex = compiled_mod.c;
 
 pub fn validate(ctx: Context) void {
     const schema_obj = ctx.schema.object;
@@ -20,15 +22,36 @@ pub fn validate(ctx: Context) void {
     if (ctx.compiled) |compiled| {
         if (compiled.getNode(ctx.schema)) |node| {
             if (node.unevaluated_all_covered) return;
-            if (node.unevaluated_ceiling) |ceiling| {
+            if (node.unevaluated_ceiling != null) {
+                const ceiling_map = node.unevaluated_ceiling_map;
+                const ceiling_arr = node.unevaluated_ceiling;
+                const pattern_regs = node.unevaluated_pattern_regexes;
                 var all_covered = true;
                 var inst_it = instance_obj.iterator();
                 while (inst_it.next()) |entry| {
+                    const prop_name = entry.key_ptr.*;
                     var found = false;
-                    for (ceiling) |name| {
-                        if (std.mem.eql(u8, entry.key_ptr.*, name)) {
-                            found = true;
+                    // Use hashmap for O(1) lookup if available
+                    if (ceiling_map) |cm| {
+                        found = cm.get(prop_name) != null;
+                    } else if (ceiling_arr) |ca| {
+                        for (ca) |name| {
+                            if (std.mem.eql(u8, prop_name, name)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!found and pattern_regs != null) {
+                        const prop_z = ctx.allocator.dupeZ(u8, prop_name) catch {
+                            all_covered = false;
                             break;
+                        };
+                        for (pattern_regs.?) |cr| {
+                            if (cr.valid and compiled_mod.c.regexec(&cr.regex, prop_z.ptr, 0, null, 0) == 0) {
+                                found = true;
+                                break;
+                            }
                         }
                     }
                     if (!found) {
@@ -46,23 +69,40 @@ pub fn validate(ctx: Context) void {
     // applicator branches). If together they cover all instance properties, skip the
     // expensive collectEvaluatedProperties tree walk.
     if (ctx.evaluated_props) |ep| {
-        const ceiling = if (ctx.compiled) |comp| blk: {
-            break :blk if (comp.getNode(ctx.schema)) |cn| cn.unevaluated_ceiling else null;
-        } else null;
+        const comp_node = if (ctx.compiled) |comp| comp.getNode(ctx.schema) else null;
+        const ceiling_map = if (comp_node) |cn| cn.unevaluated_ceiling_map else null;
+        const ceiling_arr = if (comp_node) |cn| cn.unevaluated_ceiling else null;
+        const pattern_regs = if (comp_node) |cn| cn.unevaluated_pattern_regexes else null;
         var all_covered = true;
         var inst_it = instance_obj.iterator();
         while (inst_it.next()) |entry| {
             const name = entry.key_ptr.*;
             if (ep.get(name) != null) continue;
-            if (ceiling) |c| {
+            if (ceiling_map) |cm| {
+                if (cm.get(name) != null) continue;
+            } else if (ceiling_arr) |ca| {
                 var in_ceil = false;
-                for (c) |cn| {
+                for (ca) |cn| {
                     if (std.mem.eql(u8, name, cn)) {
                         in_ceil = true;
                         break;
                     }
                 }
                 if (in_ceil) continue;
+            }
+            if (pattern_regs) |pregs| {
+                const prop_z = ctx.allocator.dupeZ(u8, name) catch {
+                    all_covered = false;
+                    break;
+                };
+                var matched = false;
+                for (pregs) |cr| {
+                    if (cr.valid and compiled_mod.c.regexec(&cr.regex, prop_z.ptr, 0, null, 0) == 0) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched) continue;
             }
             all_covered = false;
             break;
@@ -159,12 +199,23 @@ fn collectEvaluatedProperties(
     }
 
     // "patternProperties" evaluates properties matching its patterns
-    if (obj.get("patternProperties")) |pp_val| {
-        if (pp_val == .object) {
+    if (obj.get("patternProperties") != null) {
+        // Try to use pre-compiled regex from compiled schema
+        const compiled_pp = getCompiledPatternProperties(ctx, schema);
+        if (compiled_pp) |pp_entries| {
             var inst_it = instance_obj.iterator();
             while (inst_it.next()) |entry| {
-                if (pattern_properties.matchesAnyPattern(ctx.allocator, entry.key_ptr.*, pp_val.object)) {
+                if (matchesAnyCompiledPattern(ctx.allocator, entry.key_ptr.*, pp_entries)) {
                     evaluated.put(entry.key_ptr.*, {}) catch {};
+                }
+            }
+        } else if (obj.get("patternProperties")) |pp_val| {
+            if (pp_val == .object) {
+                var inst_it = instance_obj.iterator();
+                while (inst_it.next()) |entry| {
+                    if (pattern_properties.matchesAnyPattern(ctx.allocator, entry.key_ptr.*, pp_val.object)) {
+                        evaluated.put(entry.key_ptr.*, {}) catch {};
+                    }
                 }
             }
         }
@@ -172,8 +223,6 @@ fn collectEvaluatedProperties(
 
     // "additionalProperties" evaluates all remaining properties (not in properties/patternProperties)
     if (obj.get("additionalProperties") != null) {
-        // additionalProperties applies to all properties not covered by properties/patternProperties
-        // If it exists (whether true, false, or schema), the properties it applies to are "evaluated"
         var inst_it = instance_obj.iterator();
         while (inst_it.next()) |entry| {
             const prop_name = entry.key_ptr.*;
@@ -182,7 +231,10 @@ fn collectEvaluatedProperties(
                 if (props_val == .object and props_val.object.get(prop_name) != null) covered = true;
             }
             if (!covered) {
-                if (obj.get("patternProperties")) |pp_val| {
+                const compiled_pp = getCompiledPatternProperties(ctx, schema);
+                if (compiled_pp) |pp_entries| {
+                    if (matchesAnyCompiledPattern(ctx.allocator, prop_name, pp_entries)) covered = true;
+                } else if (obj.get("patternProperties")) |pp_val| {
                     if (pp_val == .object and pattern_properties.matchesAnyPattern(ctx.allocator, prop_name, pp_val.object)) covered = true;
                 }
             }
@@ -314,6 +366,11 @@ fn subschemaValidCached(ctx: Context, sub_schema: std.json.Value, instance: std.
 }
 
 fn resolveRef(ctx: Context, ref_str: []const u8) ?std.json.Value {
+    // Use compiled schema's pre-resolved local ref cache first
+    if (ctx.compiled) |comp| {
+        if (comp.resolveLocalRef(ref_str)) |resolved| return resolved;
+    }
+
     if (ctx.registry) |reg| {
         if (reg.resolveWithRoot(ctx.root_schema, ctx.base_uri, ref_str)) |res| {
             return res.schema;
@@ -369,4 +426,29 @@ fn hasDynamicAnchor(schema_val: std.json.Value, anchor_name: []const u8) bool {
         else => return false,
     };
     return std.mem.eql(u8, da_str, anchor_name);
+}
+
+/// Look up pre-compiled patternProperties regex from the CompiledSchema for a given schema node.
+fn getCompiledPatternProperties(ctx: Context, schema: std.json.Value) ?[]const compiled_mod.PatternPropertyEntry {
+    const comp = ctx.compiled orelse return null;
+    const node = comp.getNode(schema) orelse return null;
+    for (node.validators) |v| {
+        switch (v) {
+            .pattern_properties_compiled => |pp| return pp,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Check if a property name matches any pre-compiled pattern regex.
+fn matchesAnyCompiledPattern(allocator: std.mem.Allocator, prop_name: []const u8, entries: []const compiled_mod.PatternPropertyEntry) bool {
+    const prop_name_z = allocator.dupeZ(u8, prop_name) catch return false;
+    for (entries) |entry| {
+        if (!entry.regex.valid) continue;
+        if (c_regex.regexec(&entry.regex.regex, prop_name_z.ptr, 0, null, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
 }

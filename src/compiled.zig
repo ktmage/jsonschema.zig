@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const jsonschema = @import("main.zig");
 const Validator = @import("validator.zig");
 const SchemaRegistry = jsonschema.SchemaRegistry;
+pub const c = @cImport(@cInclude("regex.h"));
 
 /// A pre-compiled schema that accelerates repeated validation.
 ///
@@ -23,6 +24,8 @@ pub const CompiledSchema = struct {
     /// Pre-resolved local $ref targets (ref_string → resolved schema value).
     /// Eliminates repeated JSON pointer walks at validation time.
     local_ref_cache: std.StringHashMap(std.json.Value),
+    /// Pre-compiled regex list for cleanup in deinit.
+    compiled_regexes: []*CompiledRegex,
 
     const NodeMap = std.HashMap(
         usize,
@@ -48,6 +51,7 @@ pub const CompiledSchema = struct {
         const validation_vocab_disabled = checkValidationVocabDisabled(schema, registry);
 
         var node_map = NodeMap.init(alloc);
+        var regex_list = std.ArrayList(*CompiledRegex).init(alloc);
 
         // Pre-scan $id entries into the registry so $ref resolution works during compile
         if (registry) |reg| {
@@ -58,7 +62,7 @@ pub const CompiledSchema = struct {
         // Recursively walk the schema tree and compile every object node.
         // Uses placeholder pattern: each node is registered before recursing
         // into sub-schemas, so child nodes are available for pre-linking.
-        compileNode(alloc, schema, &node_map, is_2020, validation_vocab_disabled);
+        compileNode(alloc, schema, schema, &node_map, is_2020, validation_vocab_disabled, &regex_list);
 
         // Post-process: selectively disable needs_uri_resolution for nodes
         // whose $ref targets are fully inlinable by isValidFast.
@@ -75,6 +79,7 @@ pub const CompiledSchema = struct {
             .is_2020 = is_2020,
             .validation_vocab_disabled = validation_vocab_disabled,
             .local_ref_cache = local_ref_cache,
+            .compiled_regexes = regex_list.toOwnedSlice() catch &.{},
         };
     }
 
@@ -104,6 +109,12 @@ pub const CompiledSchema = struct {
     }
 
     pub fn deinit(self: *CompiledSchema) void {
+        // Free POSIX regex internal allocations before the arena is torn down
+        for (self.compiled_regexes) |cr| {
+            if (cr.valid) {
+                c.regfree(&cr.regex);
+            }
+        }
         self.arena.deinit();
     }
 };
@@ -171,13 +182,44 @@ pub const CompiledValidator = union(enum) {
     // so keyword functions fall back to ctx.schema.object.get(keyword_name).
     properties_compiled: []const PropertyEntry,
     all_of_compiled: []const LinkedSchema,
-    one_of_compiled: []const LinkedSchema,
+    one_of_compiled: struct {
+        schemas: []const LinkedSchema,
+        /// Discriminator field name (e.g., "type") if all branches use properties.<field>.enum.
+        discriminator_field: ?[]const u8 = null,
+        /// Mapping from discriminator enum values to pre-linked branches.
+        discriminator_map: ?[]const DiscriminatorEntry = null,
+    },
     any_of_compiled: []const LinkedSchema,
     not_compiled: LinkedSchema,
     items_compiled: struct {
         schema: LinkedSchema,
         prefix_count: usize,
     },
+
+    // Pre-linked local $ref (fragment-only, no registry needed)
+    ref_local: LinkedSchema,
+
+    // additionalProperties: false — pre-extracted allowed property names
+    additional_properties_false: []const []const u8,
+
+    // additionalProperties: {schema} — pre-linked schema + allowed property names
+    additional_properties_schema: struct {
+        schema: LinkedSchema,
+        property_names: []const []const u8,
+    },
+
+    // Pre-linked if/then/else
+    if_then_else_compiled: struct {
+        if_schema: LinkedSchema,
+        then_schema: ?LinkedSchema,
+        else_schema: ?LinkedSchema,
+    },
+
+    // Pre-compiled regex pattern (stores pointer to arena-allocated CompiledRegex)
+    pattern_compiled: *CompiledRegex,
+
+    // Pre-compiled pattern properties (regex + schema links)
+    pattern_properties_compiled: []const PatternPropertyEntry,
 
     // Complex keywords — keep as generic with function pointer fallback
     // These need full schema context (pattern matching, URI resolution, etc.)
@@ -186,6 +228,25 @@ pub const CompiledValidator = union(enum) {
         keyword_value: std.json.Value,
         keyword_name: []const u8,
     },
+};
+
+/// A pre-compiled POSIX regex stored in the arena.
+pub const CompiledRegex = struct {
+    regex: c.regex_t,
+    valid: bool,
+};
+
+/// Pre-compiled pattern property: regex + pre-linked sub-schema.
+pub const PatternPropertyEntry = struct {
+    regex: *CompiledRegex,
+    schema: LinkedSchema,
+    pattern: []const u8,
+};
+
+/// Discriminator entry for oneOf optimization: maps a string value to a branch.
+pub const DiscriminatorEntry = struct {
+    value: []const u8,
+    schema: LinkedSchema,
 };
 
 /// A pre-compiled schema node.  Stores only the keyword validators that are
@@ -207,9 +268,14 @@ pub const CompiledNode = struct {
     /// Pre-computed ceiling of property names that could be evaluated by any
     /// applicator branch. Non-null only when the schema has unevaluatedProperties.
     unevaluated_ceiling: ?[]const []const u8 = null,
+    /// Same ceiling as a hashmap for O(1) lookup (used when ceiling is large).
+    unevaluated_ceiling_map: ?*std.StringHashMap(void) = null,
     /// True if additionalProperties (not false) exists anywhere in the schema
     /// or allOf branches, meaning ALL properties are always evaluated.
     unevaluated_all_covered: bool = false,
+    /// Pre-compiled regex patterns from patternProperties in applicator branches.
+    /// Used by unevaluatedProperties ceiling check to match property names.
+    unevaluated_pattern_regexes: ?[]*CompiledRegex = null,
 
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
     /// Returns false on first failure. Only works for common keyword patterns;
@@ -349,9 +415,30 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             }
             return true;
         },
-        .one_of_compiled => |schemas| {
+        .one_of_compiled => |oo| {
+            // Discriminator fast path: if we have a discriminator, look up directly
+            if (oo.discriminator_field) |field| {
+                if (oo.discriminator_map) |dmap| {
+                    const inst_obj = switch (instance) {
+                        .object => |o| o,
+                        else => return null,
+                    };
+                    const disc_val = inst_obj.get(field) orelse return null;
+                    const disc_str = switch (disc_val) {
+                        .string => |s| s,
+                        else => return null,
+                    };
+                    for (dmap) |entry| {
+                        if (std.mem.eql(u8, disc_str, entry.value)) {
+                            return validateLinkedSchema(entry.schema, instance, compiled);
+                        }
+                    }
+                    return false; // No matching discriminator value
+                }
+            }
+            // Fallback: check all branches
             var match_count: usize = 0;
-            for (schemas) |s| {
+            for (oo.schemas) |s| {
                 if (!@import("keywords/one_of.zig").couldMatch(s.value, instance)) continue;
                 const result = validateLinkedSchema(s, instance, compiled) orelse return null;
                 if (result) {
@@ -383,12 +470,95 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 else => return true,
             };
             if (arr.len <= ic.prefix_count) return true;
+            // Ultra-fast path for simple type items (e.g., {type: "number"})
+            if (ic.schema.node) |inode| {
+                if (inode.simple_type != .none) {
+                    for (arr[ic.prefix_count..]) |item| {
+                        if (!Validator.matchesSimpleType(item, inode.simple_type)) return false;
+                    }
+                    return true;
+                }
+            }
             for (arr[ic.prefix_count..]) |item| {
                 const result = validateLinkedSchema(ic.schema, item, compiled) orelse return null;
                 if (!result) return false;
             }
             return true;
         },
+        .ref_local => |ls| {
+            return validateLinkedSchema(ls, instance, compiled);
+        },
+        .additional_properties_false => |property_names| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const prop_name = entry.key_ptr.*;
+                var found = false;
+                for (property_names) |name| {
+                    if (std.mem.eql(u8, prop_name, name)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        },
+        .additional_properties_schema => |ap| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const prop_name = entry.key_ptr.*;
+                var covered = false;
+                for (ap.property_names) |name| {
+                    if (std.mem.eql(u8, prop_name, name)) {
+                        covered = true;
+                        break;
+                    }
+                }
+                if (!covered) {
+                    const result = validateLinkedSchema(ap.schema, entry.value_ptr.*, compiled) orelse return null;
+                    if (!result) return false;
+                }
+            }
+            return true;
+        },
+        .if_then_else_compiled => |ite| {
+            const if_result = validateLinkedSchema(ite.if_schema, instance, compiled) orelse return null;
+            if (if_result) {
+                if (ite.then_schema) |ts| {
+                    return validateLinkedSchema(ts, instance, compiled);
+                }
+                return true;
+            } else {
+                if (ite.else_schema) |es| {
+                    return validateLinkedSchema(es, instance, compiled);
+                }
+                return true;
+            }
+        },
+        .pattern_compiled => |cr| {
+            const instance_str = switch (instance) {
+                .string => |s| s,
+                else => return true,
+            };
+            if (!cr.valid) return true;
+            // Null-terminate for C regex
+            // Note: in isValidFast we can't allocate, so we check if string is already null-terminated
+            // by checking if the byte after the slice is 0 (risky but std.json strings are null-terminated)
+            const ptr: [*]const u8 = instance_str.ptr;
+            if (instance_str.len > 0 and ptr[instance_str.len] == 0) {
+                return c.regexec(&cr.regex, ptr, 0, null, 0) == 0;
+            }
+            return null; // can't null-terminate without allocating
+        },
+        .pattern_properties_compiled => return null, // too complex for inline
         .generic => return null, // can't inline generic validators
     }
 }
@@ -474,7 +644,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
     if (node.simple_type != .none) return true;
     for (node.validators) |v| {
         switch (v) {
-            .generic, .pattern, .unique_items, .contains => return false,
+            .generic, .pattern, .unique_items, .contains, .pattern_properties_compiled => return false,
             else => {},
         }
     }
@@ -515,10 +685,12 @@ fn linkSchemaArray(alloc: Allocator, node_map: *const CompiledSchema.NodeMap, it
 
 fn compileNode(
     alloc: Allocator,
+    root_schema: std.json.Value,
     schema: std.json.Value,
     node_map: *CompiledSchema.NodeMap,
     is_2020: bool,
     validation_vocab_disabled: bool,
+    regex_list: *std.ArrayList(*CompiledRegex),
 ) void {
     switch (schema) {
         .object => |obj| {
@@ -533,29 +705,49 @@ fn compileNode(
 
             // 2. Recurse into sub-schemas so child nodes are available
             //    for pre-linking when we compile this node's keywords.
-            recurseIntoSubSchemas(alloc, obj, node_map, is_2020, validation_vocab_disabled);
+            recurseIntoSubSchemas(alloc, obj, root_schema, node_map, is_2020, validation_vocab_disabled, regex_list);
 
             // 3. Compile keywords with pre-linking via node_map.
             const has_ref = obj.get("$ref") != null;
             const ref_overrides = has_ref and !is_2020;
             var validators = std.ArrayList(CompiledValidator).init(alloc);
             if (!ref_overrides) {
-                compileKeywords(alloc, obj, &validators, validation_vocab_disabled, node_map);
+                compileKeywords(alloc, obj, root_schema, &validators, validation_vocab_disabled, node_map, is_2020, regex_list);
             }
 
             // 4. Pre-compute unevaluatedProperties ceiling if present.
             var unevaluated_ceiling: ?[]const []const u8 = null;
             var unevaluated_all_covered: bool = false;
+            var unevaluated_pattern_regexes: ?[]*CompiledRegex = null;
             if (obj.get("unevaluatedProperties") != null) {
                 var ceiling_set = std.StringHashMap(void).init(alloc);
                 var seen = std.AutoHashMap(usize, void).init(alloc);
-                unevaluated_all_covered = collectStaticCeiling(obj, &ceiling_set, schema, &seen);
+                var pattern_regex_list = std.ArrayList(*CompiledRegex).init(alloc);
+                unevaluated_all_covered = collectStaticCeiling(obj, &ceiling_set, root_schema, &seen, alloc, regex_list, &pattern_regex_list);
                 var names = std.ArrayList([]const u8).init(alloc);
                 var ceil_it = ceiling_set.iterator();
                 while (ceil_it.next()) |entry| {
                     names.append(entry.key_ptr.*) catch {};
                 }
                 unevaluated_ceiling = names.toOwnedSlice() catch &.{};
+                if (pattern_regex_list.items.len > 0) {
+                    unevaluated_pattern_regexes = pattern_regex_list.toOwnedSlice() catch null;
+                }
+                // Build hashmap for O(1) ceiling lookup when ceiling is large
+            }
+
+            // Build ceiling hashmap for O(1) lookup
+            var ceiling_map: ?*std.StringHashMap(void) = null;
+            if (unevaluated_ceiling) |ceil| {
+                if (ceil.len >= 4) {
+                    if (alloc.create(std.StringHashMap(void))) |hm| {
+                        hm.* = std.StringHashMap(void).init(alloc);
+                        for (ceil) |name| {
+                            hm.put(name, {}) catch {};
+                        }
+                        ceiling_map = hm;
+                    } else |_| {}
+                }
             }
 
             // 5. Fill in placeholder with actual data.
@@ -566,12 +758,14 @@ fn compileNode(
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
                 .has_unevaluated_properties = obj.get("unevaluatedProperties") != null,
                 .unevaluated_ceiling = unevaluated_ceiling,
+                .unevaluated_ceiling_map = ceiling_map,
                 .unevaluated_all_covered = unevaluated_all_covered,
+                .unevaluated_pattern_regexes = unevaluated_pattern_regexes,
             };
         },
         .array => |arr| {
             for (arr.items) |item| {
-                compileNode(alloc, item, node_map, is_2020, validation_vocab_disabled);
+                compileNode(alloc, root_schema, item, node_map, is_2020, validation_vocab_disabled, regex_list);
             }
         },
         else => {},
@@ -584,9 +778,12 @@ fn compileNode(
 fn compileKeywords(
     alloc: Allocator,
     obj: std.json.ObjectMap,
+    root_schema: std.json.Value,
     validators: *std.ArrayList(CompiledValidator),
     validation_vocab_disabled: bool,
     node_map: *const CompiledSchema.NodeMap,
+    is_2020: bool,
+    regex_list: *std.ArrayList(*CompiledRegex),
 ) void {
     // Type checking
     if (obj.get("type")) |kv| {
@@ -660,11 +857,15 @@ fn compileKeywords(
         }
     }
     if (obj.get("pattern")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/pattern.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "pattern",
-        } }) catch {};
+        if (compileRegex(alloc, kv, regex_list)) |cr| {
+            validators.append(.{ .pattern_compiled = cr }) catch {};
+        } else {
+            validators.append(.{ .generic = .{
+                .func = @import("keywords/pattern.zig").validate,
+                .keyword_value = kv,
+                .keyword_name = "pattern",
+            } }) catch {};
+        }
     }
 
     // Array
@@ -766,18 +967,45 @@ fn compileKeywords(
         }
     }
     if (obj.get("additionalProperties")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/additional_properties.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "additionalProperties",
-        } }) catch {};
+        const has_pattern_props = obj.get("patternProperties") != null;
+        if (!has_pattern_props) {
+            // No patternProperties — can use fast compiled variants
+            const prop_names = extractPropertyNames(alloc, obj);
+            switch (kv) {
+                .bool => |b| {
+                    if (!b) {
+                        validators.append(.{ .additional_properties_false = prop_names }) catch {};
+                    }
+                    // true means allow everything — no validator needed
+                },
+                .object => {
+                    validators.append(.{ .additional_properties_schema = .{
+                        .schema = linkSchema(node_map, kv),
+                        .property_names = prop_names,
+                    } }) catch {};
+                },
+                else => {},
+            }
+        } else {
+            // Has patternProperties — use generic fallback
+            validators.append(.{ .generic = .{
+                .func = @import("keywords/additional_properties.zig").validate,
+                .keyword_value = kv,
+                .keyword_name = "additionalProperties",
+            } }) catch {};
+        }
     }
     if (obj.get("patternProperties")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/pattern_properties.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "patternProperties",
-        } }) catch {};
+        // Try to pre-compile regex patterns
+        if (compilePatternProperties(alloc, kv, node_map, regex_list)) |compiled_pp| {
+            validators.append(.{ .pattern_properties_compiled = compiled_pp }) catch {};
+        } else {
+            validators.append(.{ .generic = .{
+                .func = @import("keywords/pattern_properties.zig").validate,
+                .keyword_value = kv,
+                .keyword_name = "patternProperties",
+            } }) catch {};
+        }
     }
     if (obj.get("minProperties")) |kv| {
         if (!validation_vocab_disabled) {
@@ -844,7 +1072,14 @@ fn compileKeywords(
     if (obj.get("oneOf")) |kv| {
         switch (kv) {
             .array => |arr| {
-                validators.append(.{ .one_of_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+                const linked = linkSchemaArray(alloc, node_map, arr.items);
+                // Try to detect discriminator pattern
+                const disc = detectDiscriminator(alloc, arr.items, linked);
+                validators.append(.{ .one_of_compiled = .{
+                    .schemas = linked,
+                    .discriminator_field = disc.field,
+                    .discriminator_map = disc.map,
+                } }) catch {};
             },
             else => {},
         }
@@ -855,11 +1090,36 @@ fn compileKeywords(
 
     // Reference
     if (obj.get("$ref")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/ref.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "$ref",
-        } }) catch {};
+        const ref_str = switch (kv) {
+            .string => |s| s,
+            else => null,
+        };
+        // For local fragment-only refs, pre-link the target at compile time
+        const can_pre_link = ref_str != null and ref_str.?.len > 0 and ref_str.?[0] == '#' and !is_2020;
+        if (can_pre_link) {
+            const rs = ref_str.?;
+            var resolved: ?std.json.Value = null;
+            if (rs.len == 1) {
+                resolved = root_schema;
+            } else if (rs.len >= 2 and rs[1] == '/') {
+                resolved = @import("schema_registry.zig").resolvePointer(root_schema, rs[2..]);
+            }
+            if (resolved) |r| {
+                validators.append(.{ .ref_local = linkSchema(node_map, r) }) catch {};
+            } else {
+                validators.append(.{ .generic = .{
+                    .func = @import("keywords/ref.zig").validate,
+                    .keyword_value = kv,
+                    .keyword_name = "$ref",
+                } }) catch {};
+            }
+        } else {
+            validators.append(.{ .generic = .{
+                .func = @import("keywords/ref.zig").validate,
+                .keyword_value = kv,
+                .keyword_name = "$ref",
+            } }) catch {};
+        }
     }
     if (obj.get("$dynamicRef")) |kv| {
         validators.append(.{ .generic = .{
@@ -871,10 +1131,12 @@ fn compileKeywords(
 
     // Conditional
     if (obj.get("if")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/if_then_else.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "if",
+        const then_val = obj.get("then");
+        const else_val = obj.get("else");
+        validators.append(.{ .if_then_else_compiled = .{
+            .if_schema = linkSchema(node_map, kv),
+            .then_schema = if (then_val) |tv| linkSchema(node_map, tv) else null,
+            .else_schema = if (else_val) |ev| linkSchema(node_map, ev) else null,
         } }) catch {};
     }
 
@@ -893,6 +1155,153 @@ fn compileKeywords(
             .keyword_name = "unevaluatedItems",
         } }) catch {};
     }
+}
+
+/// Detect a discriminator pattern in oneOf branches.
+/// If all branches have `properties.<field>.enum` with exactly 1 unique value,
+/// we can use that field as a discriminator for O(1) branch selection.
+fn detectDiscriminator(
+    alloc: Allocator,
+    branches: []const std.json.Value,
+    linked: []const LinkedSchema,
+) struct { field: ?[]const u8, map: ?[]const DiscriminatorEntry } {
+    if (branches.len < 2) return .{ .field = null, .map = null };
+
+    // Try common discriminator field names
+    const candidates = [_][]const u8{ "type", "kind", "discriminator" };
+    for (candidates) |field| {
+        if (tryBuildDiscriminatorMap(alloc, field, branches, linked)) |dmap| {
+            return .{ .field = field, .map = dmap };
+        }
+    }
+
+    // Try any field that has enum in the first branch
+    const first = switch (branches[0]) {
+        .object => |o| o,
+        else => return .{ .field = null, .map = null },
+    };
+    const props = switch (first.get("properties") orelse return .{ .field = null, .map = null }) {
+        .object => |o| o,
+        else => return .{ .field = null, .map = null },
+    };
+    var pit = props.iterator();
+    while (pit.next()) |entry| {
+        const prop_name = entry.key_ptr.*;
+        const prop_schema = switch (entry.value_ptr.*) {
+            .object => |o| o,
+            else => continue,
+        };
+        if (prop_schema.get("enum") != null) {
+            if (tryBuildDiscriminatorMap(alloc, prop_name, branches, linked)) |dmap| {
+                return .{ .field = prop_name, .map = dmap };
+            }
+        }
+    }
+
+    return .{ .field = null, .map = null };
+}
+
+fn tryBuildDiscriminatorMap(
+    alloc: Allocator,
+    field: []const u8,
+    branches: []const std.json.Value,
+    linked: []const LinkedSchema,
+) ?[]const DiscriminatorEntry {
+    var entries = std.ArrayList(DiscriminatorEntry).init(alloc);
+    for (branches, 0..) |branch, i| {
+        const obj = switch (branch) {
+            .object => |o| o,
+            else => return null,
+        };
+        const props = switch (obj.get("properties") orelse return null) {
+            .object => |o| o,
+            else => return null,
+        };
+        const field_schema = switch (props.get(field) orelse return null) {
+            .object => |o| o,
+            else => return null,
+        };
+        const enum_val = switch (field_schema.get("enum") orelse return null) {
+            .array => |a| a,
+            else => return null,
+        };
+        if (enum_val.items.len != 1) return null;
+        const disc_str = switch (enum_val.items[0]) {
+            .string => |s| s,
+            else => return null,
+        };
+        // Check for duplicates
+        for (entries.items) |existing| {
+            if (std.mem.eql(u8, existing.value, disc_str)) return null;
+        }
+        entries.append(.{ .value = disc_str, .schema = linked[i] }) catch return null;
+    }
+    if (entries.items.len == branches.len) {
+        return entries.toOwnedSlice() catch null;
+    }
+    return null;
+}
+
+/// Extract property names from a schema's "properties" keyword.
+fn extractPropertyNames(alloc: Allocator, obj: std.json.ObjectMap) []const []const u8 {
+    const props_val = obj.get("properties") orelse return &.{};
+    const props_obj = switch (props_val) {
+        .object => |o| o,
+        else => return &.{},
+    };
+    var names = std.ArrayList([]const u8).init(alloc);
+    var it = props_obj.iterator();
+    while (it.next()) |entry| {
+        names.append(entry.key_ptr.*) catch {};
+    }
+    return names.toOwnedSlice() catch &.{};
+}
+
+/// Compile a POSIX regex pattern string. Returns null if not a string or compilation fails.
+fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.ArrayList(*CompiledRegex)) ?*CompiledRegex {
+    const pattern_str = switch (pattern_val) {
+        .string => |s| s,
+        else => return null,
+    };
+    const cr = alloc.create(CompiledRegex) catch return null;
+    const pattern_z = alloc.dupeZ(u8, pattern_str) catch return null;
+    const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+    cr.valid = comp_result == 0;
+    regex_list.append(cr) catch {};
+    return cr;
+}
+
+/// Compile patternProperties into pre-compiled regex + linked schemas.
+fn compilePatternProperties(
+    alloc: Allocator,
+    pp_val: std.json.Value,
+    node_map: *const CompiledSchema.NodeMap,
+    regex_list: *std.ArrayList(*CompiledRegex),
+) ?[]const PatternPropertyEntry {
+    const pp_obj = switch (pp_val) {
+        .object => |o| o,
+        else => return null,
+    };
+    var entries = std.ArrayList(PatternPropertyEntry).init(alloc);
+    var it = pp_obj.iterator();
+    while (it.next()) |entry| {
+        const pattern = entry.key_ptr.*;
+        const sub_schema = entry.value_ptr.*;
+        const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
+        const cr = alloc.create(CompiledRegex) catch continue;
+        const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+        cr.valid = comp_result == 0;
+        regex_list.append(cr) catch {};
+        entries.append(.{
+            .regex = cr,
+            .schema = linkSchema(node_map, sub_schema),
+            .pattern = pattern,
+        }) catch {};
+    }
+    if (entries.items.len > 0) {
+        return entries.toOwnedSlice() catch null;
+    }
+    return null;
 }
 
 /// Compile a "type" keyword value into a CompiledValidator.
@@ -961,9 +1370,11 @@ fn detectSimpleTypeFromString(t: []const u8) SimpleType {
 fn recurseIntoSubSchemas(
     alloc: Allocator,
     obj: std.json.ObjectMap,
+    root_schema: std.json.Value,
     node_map: *CompiledSchema.NodeMap,
     is_2020: bool,
     validation_vocab_disabled: bool,
+    regex_list: *std.ArrayList(*CompiledRegex),
 ) void {
     // Sub-schema keywords (single schema)
     const single_schema_keywords = [_][]const u8{
@@ -975,7 +1386,7 @@ fn recurseIntoSubSchemas(
 
     inline for (single_schema_keywords) |kw| {
         if (obj.get(kw)) |val| {
-            compileNode(alloc, val, node_map, is_2020, validation_vocab_disabled);
+            compileNode(alloc, root_schema, val, node_map, is_2020, validation_vocab_disabled, regex_list);
         }
     }
 
@@ -989,7 +1400,7 @@ fn recurseIntoSubSchemas(
             switch (val) {
                 .array => |arr| {
                     for (arr.items) |item| {
-                        compileNode(alloc, item, node_map, is_2020, validation_vocab_disabled);
+                        compileNode(alloc, root_schema, item, node_map, is_2020, validation_vocab_disabled, regex_list);
                     }
                 },
                 else => {},
@@ -1010,7 +1421,7 @@ fn recurseIntoSubSchemas(
                 .object => |inner_obj| {
                     var it = inner_obj.iterator();
                     while (it.next()) |entry| {
-                        compileNode(alloc, entry.value_ptr.*, node_map, is_2020, validation_vocab_disabled);
+                        compileNode(alloc, root_schema, entry.value_ptr.*, node_map, is_2020, validation_vocab_disabled, regex_list);
                     }
                 },
                 else => {},
@@ -1023,7 +1434,7 @@ fn recurseIntoSubSchemas(
         switch (items_val) {
             .array => |arr| {
                 for (arr.items) |item| {
-                    compileNode(alloc, item, node_map, is_2020, validation_vocab_disabled);
+                    compileNode(alloc, root_schema, item, node_map, is_2020, validation_vocab_disabled, regex_list);
                 }
             },
             else => {}, // already handled as single schema above
@@ -1079,6 +1490,9 @@ fn collectStaticCeiling(
     ceiling: *std.StringHashMap(void),
     root_schema: std.json.Value,
     seen: *std.AutoHashMap(usize, void),
+    alloc: Allocator,
+    regex_list: *std.ArrayList(*CompiledRegex),
+    pattern_regexes: *std.ArrayList(*CompiledRegex),
 ) bool {
     // additionalProperties (not false) means all extra properties are evaluated
     if (obj.get("additionalProperties")) |ap| {
@@ -1101,10 +1515,28 @@ fn collectStaticCeiling(
         }
     }
 
+    // Collect from patternProperties — compile patterns for ceiling check
+    if (obj.get("patternProperties")) |pp| {
+        if (pp == .object) {
+            var pp_it = pp.object.iterator();
+            while (pp_it.next()) |entry| {
+                const pattern = entry.key_ptr.*;
+                const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
+                const cr = alloc.create(CompiledRegex) catch continue;
+                const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+                cr.valid = comp_result == 0;
+                regex_list.append(cr) catch {};
+                if (cr.valid) {
+                    pattern_regexes.append(cr) catch {};
+                }
+            }
+        }
+    }
+
     const single_applicators = [_][]const u8{ "then", "else", "if" };
     for (single_applicators) |keyword| {
         if (obj.get(keyword)) |sub| {
-            if (collectStaticCeilingFromSchema(sub, ceiling, root_schema, seen)) return true;
+            if (collectStaticCeilingFromSchema(sub, ceiling, root_schema, seen, alloc, regex_list, pattern_regexes)) return true;
         }
     }
 
@@ -1113,7 +1545,7 @@ fn collectStaticCeiling(
         if (obj.get(keyword)) |val| {
             if (val == .array) {
                 for (val.array.items) |sub| {
-                    if (collectStaticCeilingFromSchema(sub, ceiling, root_schema, seen)) return true;
+                    if (collectStaticCeilingFromSchema(sub, ceiling, root_schema, seen, alloc, regex_list, pattern_regexes)) return true;
                 }
             }
         }
@@ -1131,7 +1563,7 @@ fn collectStaticCeiling(
                     resolved = @import("schema_registry.zig").resolvePointer(root_schema, ref_str[2..]);
                 }
                 if (resolved) |r| {
-                    if (collectStaticCeilingFromSchema(r, ceiling, root_schema, seen)) return true;
+                    if (collectStaticCeilingFromSchema(r, ceiling, root_schema, seen, alloc, regex_list, pattern_regexes)) return true;
                 }
             }
         }
@@ -1142,7 +1574,7 @@ fn collectStaticCeiling(
         if (deps == .object) {
             var it = deps.object.iterator();
             while (it.next()) |entry| {
-                if (collectStaticCeilingFromSchema(entry.value_ptr.*, ceiling, root_schema, seen)) return true;
+                if (collectStaticCeilingFromSchema(entry.value_ptr.*, ceiling, root_schema, seen, alloc, regex_list, pattern_regexes)) return true;
             }
         }
     }
@@ -1151,17 +1583,20 @@ fn collectStaticCeiling(
 }
 
 fn collectStaticCeilingFromSchema(
-    schema: std.json.Value,
+    schema_val: std.json.Value,
     ceiling: *std.StringHashMap(void),
     root_schema: std.json.Value,
     seen: *std.AutoHashMap(usize, void),
+    alloc: Allocator,
+    regex_list: *std.ArrayList(*CompiledRegex),
+    pattern_regexes: *std.ArrayList(*CompiledRegex),
 ) bool {
-    switch (schema) {
+    switch (schema_val) {
         .object => |obj| {
             const key = @intFromPtr(obj.keys().ptr);
             if (seen.get(key) != null) return false;
             seen.put(key, {}) catch return false;
-            return collectStaticCeiling(obj, ceiling, root_schema, seen);
+            return collectStaticCeiling(obj, ceiling, root_schema, seen, alloc, regex_list, pattern_regexes);
         },
         else => return false,
     }

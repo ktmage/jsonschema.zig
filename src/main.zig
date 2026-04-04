@@ -81,6 +81,7 @@ pub fn validateCompiled(
         .ref_base_uri = "",
         .dynamic_scope = null,
         .compiled = compiled,
+        .compiled_node = compiled.getNode(schema),
     };
 
     Validator.validateAll(ctx);

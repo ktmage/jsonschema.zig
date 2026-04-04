@@ -571,38 +571,409 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("maxProperties", "Object has too many properties");
                         }
                     },
-                    .properties_compiled => |_| {
-                        var child = ctx;
-                        child.current_keyword_value = null;
-                        child.compiled_node = null;
-                        @import("keywords/properties.zig").validate(child);
+                    .properties_compiled => |entries| {
+                        // Inline fast path: use pre-linked nodes directly
+                        const inst_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        if (ctx.evaluated_props == null) {
+                            // No unevaluatedProperties tracking needed — pure fast path
+                            var need_slow = false;
+                            for (entries) |entry| {
+                                const inst_val = inst_obj.get(entry.name) orelse continue;
+                                if (entry.schema.node) |enode| {
+                                    if (!enode.needs_uri_resolution) {
+                                        if (enode.isValidFast(inst_val, compiled)) |result| {
+                                            if (result) continue;
+                                        }
+                                    }
+                                }
+                                need_slow = true;
+                                break;
+                            }
+                            if (need_slow) {
+                                var child = ctx;
+                                child.current_keyword_value = null;
+                                child.compiled_node = null;
+                                @import("keywords/properties.zig").validate(child);
+                            }
+                        } else {
+                            var child = ctx;
+                            child.current_keyword_value = null;
+                            child.compiled_node = null;
+                            @import("keywords/properties.zig").validate(child);
+                        }
                     },
-                    .all_of_compiled => |_| {
-                        var child = ctx;
-                        child.current_keyword_value = null;
-                        child.compiled_node = null;
-                        @import("keywords/all_of.zig").validate(child);
+                    .all_of_compiled => |schemas| {
+                        // Inline fast path: use pre-linked schemas
+                        var need_slow = false;
+                        for (schemas) |s| {
+                            if (s.node) |snode| {
+                                if (!snode.needs_uri_resolution) {
+                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                        if (result) continue;
+                                    }
+                                }
+                            }
+                            need_slow = true;
+                            break;
+                        }
+                        if (need_slow) {
+                            var child = ctx;
+                            child.current_keyword_value = null;
+                            child.compiled_node = null;
+                            @import("keywords/all_of.zig").validate(child);
+                        }
                     },
-                    .one_of_compiled => |_| {
-                        var child = ctx;
-                        child.current_keyword_value = null;
-                        child.compiled_node = null;
-                        @import("keywords/one_of.zig").validate(child);
+                    .one_of_compiled => |oo| {
+                        // Discriminator fast path: direct branch lookup
+                        if (oo.discriminator_field) |field| {
+                            if (oo.discriminator_map) |dmap| {
+                                const disc_val = blk: {
+                                    const inst_obj = switch (ctx.instance) {
+                                        .object => |o| o,
+                                        else => break :blk @as(?[]const u8, null),
+                                    };
+                                    const fv = inst_obj.get(field) orelse break :blk @as(?[]const u8, null);
+                                    break :blk switch (fv) {
+                                        .string => |s| @as(?[]const u8, s),
+                                        else => @as(?[]const u8, null),
+                                    };
+                                };
+                                if (disc_val) |dv| {
+                                    var matched = false;
+                                    for (dmap) |entry| {
+                                        if (std.mem.eql(u8, dv, entry.value)) {
+                                            if (entry.schema.node) |snode| {
+                                                if (!snode.needs_uri_resolution) {
+                                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                                        if (result) {
+                                                            matched = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // Not fast — fall through to slow path
+                                            if (!matched) {
+                                                if (ctx.isSubschemaValidWithNode(entry.schema.value, ctx.instance, entry.schema.node)) {
+                                                    matched = true;
+                                                    break;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    if (!matched) {
+                                        ctx.addError("oneOf", "Instance does not match any schema in oneOf");
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        // Non-discriminator: inline fast path
+                        var fast_ok = true;
+                        var match_count: usize = 0;
+                        for (oo.schemas) |s| {
+                            if (!@import("keywords/one_of.zig").couldMatch(s.value, ctx.instance)) continue;
+                            if (s.node) |snode| {
+                                if (!snode.needs_uri_resolution) {
+                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                        if (result) {
+                                            match_count += 1;
+                                            if (match_count > 1) break;
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            fast_ok = false;
+                            break;
+                        }
+                        if (fast_ok) {
+                            if (match_count != 1) {
+                                if (match_count == 0) {
+                                    ctx.addError("oneOf", "Instance does not match any schema in oneOf");
+                                } else {
+                                    ctx.addError("oneOf", "Instance matches more than one schema in oneOf");
+                                }
+                            }
+                        } else {
+                            var child = ctx;
+                            child.current_keyword_value = null;
+                            child.compiled_node = null;
+                            @import("keywords/one_of.zig").validate(child);
+                        }
                     },
-                    .any_of_compiled => |_| {
-                        var child = ctx;
-                        child.current_keyword_value = null;
-                        child.compiled_node = null;
-                        @import("keywords/any_of.zig").validate(child);
+                    .any_of_compiled => |schemas| {
+                        // Inline fast path
+                        var found = false;
+                        var need_slow = false;
+                        for (schemas) |s| {
+                            if (s.node) |snode| {
+                                if (!snode.needs_uri_resolution) {
+                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                        if (result) {
+                                            found = true;
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            need_slow = true;
+                            break;
+                        }
+                        if (!found and need_slow) {
+                            var child = ctx;
+                            child.current_keyword_value = null;
+                            child.compiled_node = null;
+                            @import("keywords/any_of.zig").validate(child);
+                        } else if (!found and !need_slow) {
+                            ctx.addError("anyOf", "Instance does not match any schema in anyOf");
+                        }
                     },
-                    .not_compiled => |_| {
+                    .not_compiled => |ls| {
+                        if (ls.node) |snode| {
+                            if (!snode.needs_uri_resolution) {
+                                if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (result) {
+                                        ctx.addError("not", "Instance must not validate against the schema");
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         var child = ctx;
                         child.current_keyword_value = null;
                         child.compiled_node = null;
                         @import("keywords/not_keyword.zig").validate(child);
                     },
-                    .items_compiled => |_| {
+                    .items_compiled => |ic| {
+                        // Inline fast path: use pre-linked items schema node
+                        const arr = switch (ctx.instance) {
+                            .array => |a| a,
+                            else => continue,
+                        };
+                        if (arr.items.len <= ic.prefix_count) continue;
+                        if (ic.schema.node) |inode| {
+                            if (!inode.needs_uri_resolution) {
+                                // Ultra-fast path for simple type items (e.g., {type: "number"})
+                                if (inode.simple_type != .none) {
+                                    var all_valid = true;
+                                    for (arr.items[ic.prefix_count..]) |item| {
+                                        if (!matchesSimpleType(item, inode.simple_type)) {
+                                            all_valid = false;
+                                            break;
+                                        }
+                                    }
+                                    if (all_valid) continue;
+                                } else {
+                                    var all_fast = true;
+                                    for (arr.items[ic.prefix_count..]) |item| {
+                                        if (inode.isValidFast(item, compiled)) |result| {
+                                            if (result) continue;
+                                        }
+                                        all_fast = false;
+                                        break;
+                                    }
+                                    if (all_fast) continue;
+                                }
+                            }
+                        }
                         @import("keywords/items.zig").validate(ctx);
+                    },
+                    .ref_local => |ls| {
+                        // Inline local $ref: directly validate against pre-linked target
+                        if (ls.node) |rnode| {
+                            if (!rnode.needs_uri_resolution) {
+                                if (rnode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (result) continue;
+                                }
+                                // Invalid or can't inline — fall back to full validation
+                                const result = ctx.validateSubschema(ls.value, ctx.instance, ctx.instance_path, ctx.schema_path);
+                                defer result.deinit();
+                                if (!result.isValid()) {
+                                    for (result.errors) |err| {
+                                        ctx.errors.append(.{
+                                            .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
+                                            .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
+                                            .keyword = err.keyword,
+                                            .message = ctx.allocator.dupe(u8, err.message) catch return,
+                                        }) catch return;
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                        // Fall back to full ref validation
+                        var child = ctx;
+                        child.current_keyword_value = null;
+                        child.compiled_node = null;
+                        @import("keywords/ref.zig").validate(child);
+                    },
+                    .additional_properties_false => |property_names| {
+                        const inst_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        var it = inst_obj.iterator();
+                        while (it.next()) |entry| {
+                            const prop_name = entry.key_ptr.*;
+                            var found = false;
+                            for (property_names) |name| {
+                                if (std.mem.eql(u8, prop_name, name)) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                const msg = std.fmt.allocPrint(
+                                    ctx.allocator,
+                                    "Additional property '{s}' is not allowed",
+                                    .{prop_name},
+                                ) catch continue;
+                                ctx.addError("additionalProperties", msg);
+                            }
+                        }
+                    },
+                    .additional_properties_schema => |ap| {
+                        const inst_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        var it = inst_obj.iterator();
+                        while (it.next()) |entry| {
+                            const prop_name = entry.key_ptr.*;
+                            const prop_value = entry.value_ptr.*;
+                            var covered = false;
+                            for (ap.property_names) |name| {
+                                if (std.mem.eql(u8, prop_name, name)) {
+                                    covered = true;
+                                    break;
+                                }
+                            }
+                            if (!covered) {
+                                // Fast path: try isValidFast on the additional property
+                                if (ap.schema.node) |anode| {
+                                    if (!anode.needs_uri_resolution) {
+                                        if (anode.isValidFast(prop_value, compiled)) |result| {
+                                            if (result) continue;
+                                        }
+                                    }
+                                }
+                                // Slow path
+                                var child = ctx;
+                                child.current_keyword_value = null;
+                                child.compiled_node = null;
+                                @import("keywords/additional_properties.zig").validate(child);
+                                break;
+                            }
+                        }
+                    },
+                    .if_then_else_compiled => |ite| {
+                        // Inline fast path: use pre-linked schemas
+                        const if_valid = blk: {
+                            if (ite.if_schema.node) |inode| {
+                                if (!inode.needs_uri_resolution) {
+                                    if (inode.isValidFast(ctx.instance, compiled)) |result| {
+                                        break :blk result;
+                                    }
+                                }
+                            }
+                            break :blk ctx.isSubschemaValid(ite.if_schema.value, ctx.instance);
+                        };
+                        if (if_valid) {
+                            if (ite.then_schema) |ts| {
+                                // Fast path for then
+                                if (ts.node) |tnode| {
+                                    if (!tnode.needs_uri_resolution) {
+                                        if (tnode.isValidFast(ctx.instance, compiled)) |result| {
+                                            if (result) continue;
+                                        }
+                                    }
+                                }
+                                // Slow path
+                                var child = ctx;
+                                child.current_keyword_value = null;
+                                child.compiled_node = null;
+                                @import("keywords/if_then_else.zig").validate(child);
+                            }
+                        } else {
+                            if (ite.else_schema) |es| {
+                                // Fast path for else
+                                if (es.node) |enode| {
+                                    if (!enode.needs_uri_resolution) {
+                                        if (enode.isValidFast(ctx.instance, compiled)) |result| {
+                                            if (result) continue;
+                                        }
+                                    }
+                                }
+                                // Slow path
+                                var child = ctx;
+                                child.current_keyword_value = null;
+                                child.compiled_node = null;
+                                @import("keywords/if_then_else.zig").validate(child);
+                            }
+                        }
+                    },
+                    .pattern_compiled => |cr| {
+                        const instance_str = switch (ctx.instance) {
+                            .string => |s| s,
+                            else => continue,
+                        };
+                        if (!cr.valid) continue;
+                        const instance_z = ctx.allocator.dupeZ(u8, instance_str) catch continue;
+                        defer ctx.allocator.free(instance_z);
+                        if (compiled_mod.c.regexec(&cr.regex, instance_z.ptr, 0, null, 0) != 0) {
+                            ctx.addError("pattern", "String does not match pattern");
+                        }
+                    },
+                    .pattern_properties_compiled => |pp_entries| {
+                        const inst_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        for (pp_entries) |pp_entry| {
+                            if (!pp_entry.regex.valid) continue;
+                            var inst_it = inst_obj.iterator();
+                            while (inst_it.next()) |entry| {
+                                const prop_name = entry.key_ptr.*;
+                                const prop_value = entry.value_ptr.*;
+                                const prop_name_z = ctx.allocator.dupeZ(u8, prop_name) catch continue;
+                                if (compiled_mod.c.regexec(&pp_entry.regex.regex, prop_name_z.ptr, 0, null, 0) == 0) {
+                                    if (ctx.evaluated_props) |ep| {
+                                        ep.put(prop_name, {}) catch {};
+                                    }
+                                    // Fast path
+                                    if (pp_entry.schema.node) |pnode| {
+                                        if (!pnode.needs_uri_resolution) {
+                                            if (pnode.isValidFast(prop_value, compiled)) |result| {
+                                                if (result) continue;
+                                            }
+                                        }
+                                    }
+                                    if (ctx.isSubschemaValidWithNode(pp_entry.schema.value, prop_value, pp_entry.schema.node)) continue;
+                                    // Invalid — build error
+                                    const base_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "patternProperties");
+                                    const pp_path = @import("json_pointer.zig").appendProperty(ctx.allocator, base_path, pp_entry.pattern);
+                                    const prop_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.instance_path, prop_name);
+                                    const result = ctx.validateSubschema(pp_entry.schema.value, prop_value, prop_path, pp_path);
+                                    defer result.deinit();
+                                    if (!result.isValid()) {
+                                        for (result.errors) |err| {
+                                            ctx.errors.append(.{
+                                                .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
+                                                .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
+                                                .keyword = err.keyword,
+                                                .message = ctx.allocator.dupe(u8, err.message) catch return,
+                                            }) catch return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     },
                     .generic => |g| {
                         var child = ctx;
