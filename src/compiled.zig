@@ -225,6 +225,15 @@ pub const CompiledValidator = union(enum) {
         else_schema: ?LinkedSchema,
     },
 
+    // Compiled unevaluatedProperties with inline ceiling check
+    unevaluated_properties_compiled: struct {
+        schema_value: std.json.Value,
+        ceiling_map: ?*std.StringHashMap(void),
+        ceiling_arr: ?[]const []const u8,
+        pattern_regexes: ?[]*CompiledRegex,
+        all_covered: bool,
+    },
+
     // Pre-compiled regex pattern (stores pointer to arena-allocated CompiledRegex)
     pattern_compiled: *CompiledRegex,
 
@@ -291,6 +300,8 @@ pub const CompiledNode = struct {
     always_valid: bool = false,
     /// True if this schema has $id or $ref — needs slow path for URI resolution.
     needs_uri_resolution: bool = false,
+    /// True if this schema has $id (scope change).
+    has_id: bool = false,
     /// True if this schema has unevaluatedProperties keyword.
     has_unevaluated_properties: bool = false,
     /// Pre-computed ceiling of property names that could be evaluated by any
@@ -628,6 +639,42 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             }
             return null; // can't null-terminate without allocating
         },
+        .unevaluated_properties_compiled => |up| {
+            if (up.all_covered) return true;
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            // Inline ceiling check (no allocation needed for hashmap + prefix match)
+            const keys = obj.keys();
+            for (keys) |key| {
+                var found = false;
+                if (up.ceiling_map) |cm| {
+                    found = cm.get(key) != null;
+                } else if (up.ceiling_arr) |ca| {
+                    for (ca) |name| {
+                        if (key.len == name.len and std.mem.eql(u8, key, name)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found and up.pattern_regexes != null) {
+                    for (up.pattern_regexes.?) |cr| {
+                        if (cr.simple_prefix) |prefix| {
+                            if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        // Can't use full regex without allocation — bail
+                        if (cr.simple_prefix == null) return null;
+                    }
+                }
+                if (!found) return null; // Can't determine — need full validation
+            }
+            return true; // All properties covered by ceiling
+        },
         .pattern_properties_compiled => return null, // too complex for inline
         .generic => return null, // can't inline generic validators
     }
@@ -772,32 +819,56 @@ fn getUint(val: std.json.Value) ?u64 {
 /// so isValidFast can be called on this node (delegating to the target via pre-linked validators).
 fn optimizeRefResolution(root_schema: std.json.Value, node_map: *const CompiledSchema.NodeMap) void {
     const schema_reg = @import("schema_registry.zig");
-    var it = node_map.iterator();
-    while (it.next()) |entry| {
-        const node = entry.value_ptr.*;
-        if (!node.needs_uri_resolution) continue;
-        for (node.validators) |v| {
-            switch (v) {
-                .generic => |g| {
-                    if (g.keyword_name.ptr == "$ref".ptr or std.mem.eql(u8, g.keyword_name, "$ref")) {
-                        const ref_str = switch (g.keyword_value) {
-                            .string => |s| s,
-                            else => continue,
-                        };
-                        if (ref_str.len >= 2 and ref_str[0] == '#' and ref_str[1] == '/') {
-                            if (schema_reg.resolvePointer(root_schema, ref_str[2..])) |resolved| {
-                                if (resolved == .object) {
-                                    if (node_map.get(@intFromPtr(resolved.object.keys().ptr))) |target| {
-                                        if (isNodeFullyInlinable(target)) {
-                                            node.needs_uri_resolution = false;
-                                        }
-                                    }
-                                }
-                            }
+    // Multi-pass: keep iterating until no more changes
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = node_map.iterator();
+        while (it.next()) |entry| {
+            const node = entry.value_ptr.*;
+            if (!node.needs_uri_resolution) continue;
+            // Skip nodes with $id — they always need URI resolution for scope change
+            if (node.has_id) continue;
+            // Check if ALL refs in this node are fully inlinable
+            var can_clear = true;
+            for (node.validators) |v| {
+                switch (v) {
+                    .generic => |g| {
+                        if (std.mem.eql(u8, g.keyword_name, "$ref")) {
+                            const ref_str = switch (g.keyword_value) {
+                                .string => |s| s,
+                                else => {
+                                    can_clear = false;
+                                    break;
+                                },
+                            };
+                            if (ref_str.len >= 2 and ref_str[0] == '#' and ref_str[1] == '/') {
+                                if (schema_reg.resolvePointer(root_schema, ref_str[2..])) |resolved| {
+                                    if (resolved == .object) {
+                                        if (node_map.get(@intFromPtr(resolved.object.keys().ptr))) |target| {
+                                            if (!isNodeFullyInlinable(target) and !target.always_valid) {
+                                                can_clear = false;
+                                            }
+                                        } else can_clear = false;
+                                    } else can_clear = false;
+                                } else can_clear = false;
+                            } else can_clear = false;
                         }
-                    }
-                },
-                else => {},
+                    },
+                    .ref_local => |ls| {
+                        if (ls.node) |target| {
+                            if (target.needs_uri_resolution and !target.always_valid) {
+                                can_clear = false;
+                            }
+                        } else can_clear = false;
+                    },
+                    else => {},
+                }
+                if (!can_clear) break;
+            }
+            if (can_clear) {
+                node.needs_uri_resolution = false;
+                changed = true;
             }
         }
     }
@@ -816,7 +887,8 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
             else => {},
         }
     }
-    if (node.unevaluated_ceiling != null) return false; // has unevaluatedProperties
+    // unevaluated_properties_compiled is handled by isValidatorValid
+    // (only for ceiling-based checks without regex allocation)
     return true;
 }
 
@@ -922,6 +994,27 @@ fn compileNode(
                 }
             }
 
+            // 4b. Replace generic unevaluatedProperties with compiled variant
+            if (unevaluated_ceiling != null or unevaluated_all_covered) {
+                for (validators.items, 0..) |v, vi| {
+                    switch (v) {
+                        .generic => |g| {
+                            if (std.mem.eql(u8, g.keyword_name, "unevaluatedProperties")) {
+                                validators.items[vi] = .{ .unevaluated_properties_compiled = .{
+                                    .schema_value = g.keyword_value,
+                                    .ceiling_map = ceiling_map,
+                                    .ceiling_arr = unevaluated_ceiling,
+                                    .pattern_regexes = unevaluated_pattern_regexes,
+                                    .all_covered = unevaluated_all_covered,
+                                } };
+                                break;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+
             // 5. Fill in placeholder with actual data.
             const final_validators = validators.toOwnedSlice() catch &.{};
             node.* = .{
@@ -930,6 +1023,7 @@ fn compileNode(
                 .simple_type = detectSimpleType(obj),
                 .always_valid = !ref_overrides and (final_validators.len == 0 or isAlwaysValid(final_validators)),
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
+                .has_id = obj.get("$id") != null,
                 .has_unevaluated_properties = obj.get("unevaluatedProperties") != null,
                 .unevaluated_ceiling = unevaluated_ceiling,
                 .unevaluated_ceiling_map = ceiling_map,

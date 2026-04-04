@@ -1030,6 +1030,49 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("pattern", "String does not match pattern");
                         }
                     },
+                    .unevaluated_properties_compiled => |up| {
+                        // Fast path: ceiling check inline
+                        if (up.all_covered) continue;
+                        const up_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        if (up.ceiling_map != null or up.ceiling_arr != null) {
+                            var all_ok = true;
+                            const up_keys = up_obj.keys();
+                            for (up_keys) |key| {
+                                var found = false;
+                                if (up.ceiling_map) |cm| {
+                                    found = cm.get(key) != null;
+                                } else if (up.ceiling_arr) |ca| {
+                                    for (ca) |name| {
+                                        if (key.len == name.len and std.mem.eql(u8, key, name)) {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!found and up.pattern_regexes != null) {
+                                    for (up.pattern_regexes.?) |cr| {
+                                        if (cr.matches(key, ctx.allocator)) {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!found) {
+                                    all_ok = false;
+                                    break;
+                                }
+                            }
+                            if (all_ok) continue;
+                        }
+                        // Fall back to full unevaluatedProperties validation
+                        var child = ctx;
+                        child.current_keyword_value = up.schema_value;
+                        child.compiled_node = null;
+                        @import("keywords/unevaluated_properties.zig").validate(child);
+                    },
                     .pattern_properties_compiled => |pp_entries| {
                         const inst_obj = switch (ctx.instance) {
                             .object => |o| o,
