@@ -287,6 +287,8 @@ pub const CompiledNode = struct {
     /// If this schema is simply {"type": "xxx"}, store the type tag for
     /// ultra-fast validation without going through the full validator dispatch.
     simple_type: SimpleType = .none,
+    /// True if this schema always validates (e.g., {} or {patternProperties: {"^x-": true}}).
+    always_valid: bool = false,
     /// True if this schema has $id or $ref — needs slow path for URI resolution.
     needs_uri_resolution: bool = false,
     /// True if this schema has unevaluatedProperties keyword.
@@ -308,6 +310,7 @@ pub const CompiledNode = struct {
     /// falls back to full validation for complex keywords.
     /// Returns null if this node has keywords that can't be inlined (caller must use FBA fallback).
     pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+        if (self.always_valid) return true;
         if (self.simple_type != .none) {
             return Validator.matchesSimpleType(instance, self.simple_type);
         }
@@ -704,6 +707,21 @@ fn validateNestedArray(instance: std.json.Value, inner_type: SimpleType, min_ite
     return true;
 }
 
+/// Check if validators always pass (no-op schema).
+fn isAlwaysValid(validators: []const CompiledValidator) bool {
+    for (validators) |v| {
+        switch (v) {
+            .pattern_properties_compiled => |pp_entries| {
+                for (pp_entries) |entry| {
+                    if (entry.schema.value != .bool or !entry.schema.value.bool) return false;
+                }
+            },
+            else => return false,
+        }
+    }
+    return true;
+}
+
 fn getNumber(val: std.json.Value) ?f64 {
     return switch (val) {
         .integer => |n| @floatFromInt(n),
@@ -895,10 +913,12 @@ fn compileNode(
             }
 
             // 5. Fill in placeholder with actual data.
+            const final_validators = validators.toOwnedSlice() catch &.{};
             node.* = .{
-                .validators = validators.toOwnedSlice() catch &.{},
+                .validators = final_validators,
                 .ref_overrides = ref_overrides,
                 .simple_type = detectSimpleType(obj),
+                .always_valid = final_validators.len == 0 or isAlwaysValid(final_validators),
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
                 .has_unevaluated_properties = obj.get("unevaluatedProperties") != null,
                 .unevaluated_ceiling = unevaluated_ceiling,
