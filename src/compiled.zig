@@ -480,13 +480,23 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 else => return true,
             };
             if (arr.len <= ic.prefix_count) return true;
-            // Ultra-fast path for simple type items (e.g., {type: "number"})
             if (ic.schema.node) |inode| {
+                // Ultra-fast path for simple type items (e.g., {type: "number"})
                 if (inode.simple_type != .none) {
                     for (arr[ic.prefix_count..]) |item| {
                         if (!Validator.matchesSimpleType(item, inode.simple_type)) return false;
                     }
                     return true;
+                }
+                // Fast path for array-of-simple-type (e.g., coordinates: [[number]])
+                // Directly check nested arrays without going through full isValidFast
+                if (!inode.needs_uri_resolution and !inode.ref_overrides) {
+                    if (getNestedSimpleType(inode)) |info| {
+                        for (arr[ic.prefix_count..]) |item| {
+                            if (!validateNestedArray(item, info.inner_type, info.min_items, info.depth)) return false;
+                        }
+                        return true;
+                    }
                 }
             }
             for (arr[ic.prefix_count..]) |item| {
@@ -602,6 +612,80 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
         .pattern_properties_compiled => return null, // too complex for inline
         .generic => return null, // can't inline generic validators
     }
+}
+
+/// Info about a nested array pattern (e.g., [[number]] or [[[number]]]).
+const NestedArrayInfo = struct {
+    inner_type: SimpleType,
+    min_items: ?u64,
+    depth: u8, // 0 = items are simple type, 1 = items are arrays of simple type, etc.
+};
+
+/// Detect if a node is an array-of-...-of-simple-type pattern.
+/// Returns info about the nesting if found, null otherwise.
+fn getNestedSimpleType(node: *const CompiledNode) ?NestedArrayInfo {
+    // Node must be an array type with items_compiled
+    var has_type_array = false;
+    var min_items: ?u64 = null;
+    var items_node: ?*const CompiledNode = null;
+
+    for (node.validators) |nv| {
+        switch (nv) {
+            .type_single => |st| {
+                if (st == .array) has_type_array = true else return null;
+            },
+            .min_items => |m| min_items = m,
+            .items_compiled => |ic| {
+                items_node = if (ic.schema.node) |n| n else return null;
+            },
+            .object_fast, .required, .properties_compiled, .generic,
+            .pattern_compiled, .pattern_properties_compiled,
+            => return null,
+            else => {},
+        }
+    }
+
+    if (!has_type_array) return null;
+    const inode = items_node orelse return null;
+
+    // Check if items is a simple type
+    if (inode.simple_type != .none) {
+        return .{ .inner_type = inode.simple_type, .min_items = min_items, .depth = 0 };
+    }
+
+    // Check if items is another array (recursive)
+    if (!inode.needs_uri_resolution and !inode.ref_overrides) {
+        if (getNestedSimpleType(inode)) |inner| {
+            if (inner.depth < 4) { // limit recursion
+                return .{ .inner_type = inner.inner_type, .min_items = min_items, .depth = inner.depth + 1 };
+            }
+        }
+    }
+
+    return null;
+}
+
+/// Validate a nested array structure directly without recursive isValidFast calls.
+fn validateNestedArray(instance: std.json.Value, inner_type: SimpleType, min_items: ?u64, depth: u8) bool {
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return false,
+    };
+    if (min_items) |m| {
+        if (arr.len < m) return false;
+    }
+    if (depth == 0) {
+        // Innermost level: check each element against simple type
+        for (arr) |item| {
+            if (!Validator.matchesSimpleType(item, inner_type)) return false;
+        }
+        return true;
+    }
+    // Recurse one level deeper
+    for (arr) |item| {
+        if (!validateNestedArray(item, inner_type, null, depth - 1)) return false;
+    }
+    return true;
 }
 
 fn getNumber(val: std.json.Value) ?f64 {
