@@ -888,7 +888,8 @@ pub fn validateAll(ctx: Context) void {
                     },
                     .ref_local => |ls| {
                         // Inline local $ref: directly validate against pre-linked target
-                        if (ls.node) |rnode| {
+                        const rnode_opt = ls.node orelse if (ctx.compiled) |cc| cc.getNode(ls.value) else null;
+                        if (rnode_opt) |rnode| {
                             const can_skip = !rnode.needs_uri_resolution or
                                 (!rnode.has_id and ctx.registry == null);
                             if (can_skip) {
@@ -897,27 +898,16 @@ pub fn validateAll(ctx: Context) void {
                                     if (result) continue;
                                 }
                                 // Can't fully inline — call validateAll directly on target
-                                const ref_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "$ref");
-                                var errors = std.ArrayList(jsonschema.ValidationError).init(ctx.allocator);
-                                const child = Context{
-                                    .allocator = ctx.allocator,
-                                    .root_schema = ctx.root_schema,
-                                    .schema = ls.value,
-                                    .instance = ctx.instance,
-                                    .instance_path = ctx.instance_path,
-                                    .schema_path = ref_path,
-                                    .errors = &errors,
-                                    .registry = ctx.registry,
-                                    .base_uri = ctx.base_uri,
-                                    .ref_base_uri = ctx.base_uri,
-                                    .dynamic_scope = ctx.dynamic_scope,
-                                    .compiled = ctx.compiled,
-                                    .compiled_node = rnode,
-                                };
-                                validateAll(child);
-                                if (errors.items.len > 0) {
-                                    for (errors.items) |err| {
-                                        ctx.errors.append(err) catch {};
+                                const result = ctx.validateSubschema(ls.value, ctx.instance, ctx.instance_path, ctx.schema_path);
+                                defer result.deinit();
+                                if (!result.isValid()) {
+                                    for (result.errors) |err| {
+                                        ctx.errors.append(.{
+                                            .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
+                                            .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
+                                            .keyword = err.keyword,
+                                            .message = ctx.allocator.dupe(u8, err.message) catch return,
+                                        }) catch return;
                                     }
                                 }
                                 continue;
