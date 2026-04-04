@@ -43,12 +43,8 @@ pub fn validate(ctx: Context) void {
                         }
                     }
                     if (!found and pattern_regs != null) {
-                        const prop_z = ctx.allocator.dupeZ(u8, prop_name) catch {
-                            all_covered = false;
-                            break;
-                        };
                         for (pattern_regs.?) |cr| {
-                            if (cr.valid and compiled_mod.c.regexec(&cr.regex, prop_z.ptr, 0, null, 0) == 0) {
+                            if (cr.matches(prop_name, ctx.allocator)) {
                                 found = true;
                                 break;
                             }
@@ -64,10 +60,7 @@ pub fn validate(ctx: Context) void {
         }
     }
 
-    // Fast path 2: combine runtime tracked set (from properties/additionalProperties/
-    // patternProperties during this validation) with compile-time ceiling (from all
-    // applicator branches). If together they cover all instance properties, skip the
-    // expensive collectEvaluatedProperties tree walk.
+    // Fast path 2: combine runtime tracked set with compile-time ceiling
     if (ctx.evaluated_props) |ep| {
         const comp_node = if (ctx.compiled) |comp| comp.getNode(ctx.schema) else null;
         const ceiling_map = if (comp_node) |cn| cn.unevaluated_ceiling_map else null;
@@ -91,13 +84,9 @@ pub fn validate(ctx: Context) void {
                 if (in_ceil) continue;
             }
             if (pattern_regs) |pregs| {
-                const prop_z = ctx.allocator.dupeZ(u8, name) catch {
-                    all_covered = false;
-                    break;
-                };
                 var matched = false;
                 for (pregs) |cr| {
-                    if (cr.valid and compiled_mod.c.regexec(&cr.regex, prop_z.ptr, 0, null, 0) == 0) {
+                    if (cr.matches(name, ctx.allocator)) {
                         matched = true;
                         break;
                     }
@@ -443,12 +432,8 @@ fn getCompiledPatternProperties(ctx: Context, schema: std.json.Value) ?[]const c
 
 /// Check if a property name matches any pre-compiled pattern regex.
 fn matchesAnyCompiledPattern(allocator: std.mem.Allocator, prop_name: []const u8, entries: []const compiled_mod.PatternPropertyEntry) bool {
-    const prop_name_z = allocator.dupeZ(u8, prop_name) catch return false;
     for (entries) |entry| {
-        if (!entry.regex.valid) continue;
-        if (c_regex.regexec(&entry.regex.regex, prop_name_z.ptr, 0, null, 0) == 0) {
-            return true;
-        }
+        if (entry.regex.matches(prop_name, allocator)) return true;
     }
     return false;
 }

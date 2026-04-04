@@ -1036,13 +1036,11 @@ pub fn validateAll(ctx: Context) void {
                             else => continue,
                         };
                         for (pp_entries) |pp_entry| {
-                            if (!pp_entry.regex.valid) continue;
                             var inst_it = inst_obj.iterator();
                             while (inst_it.next()) |entry| {
                                 const prop_name = entry.key_ptr.*;
                                 const prop_value = entry.value_ptr.*;
-                                const prop_name_z = ctx.allocator.dupeZ(u8, prop_name) catch continue;
-                                if (compiled_mod.c.regexec(&pp_entry.regex.regex, prop_name_z.ptr, 0, null, 0) == 0) {
+                                if (pp_entry.regex.matches(prop_name, ctx.allocator)) {
                                     if (ctx.evaluated_props) |ep| {
                                         ep.put(prop_name, {}) catch {};
                                     }

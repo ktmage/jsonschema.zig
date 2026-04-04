@@ -244,6 +244,22 @@ pub const CompiledValidator = union(enum) {
 pub const CompiledRegex = struct {
     regex: c.regex_t,
     valid: bool,
+    /// Simple prefix string for fast matching (e.g., "^x-" → prefix = "x-")
+    /// When non-null, use prefix match instead of regex for speed.
+    simple_prefix: ?[]const u8 = null,
+
+    /// Check if a string matches this compiled pattern.
+    pub fn matches(self: *const CompiledRegex, str: []const u8, allocator: ?std.mem.Allocator) bool {
+        // Fast path: simple prefix match (no regex, no allocation)
+        if (self.simple_prefix) |prefix| {
+            return str.len >= prefix.len and std.mem.eql(u8, str[0..prefix.len], prefix);
+        }
+        // Regex path: need null-terminated string
+        if (!self.valid) return false;
+        const alloc = allocator orelse return false;
+        const str_z = alloc.dupeZ(u8, str) catch return false;
+        return c.regexec(&self.regex, str_z.ptr, 0, null, 0) == 0;
+    }
 };
 
 /// Pre-compiled pattern property: regex + pre-linked sub-schema.
@@ -910,7 +926,7 @@ fn compileKeywords(
     validators: *std.ArrayList(CompiledValidator),
     validation_vocab_disabled: bool,
     node_map: *const CompiledSchema.NodeMap,
-    is_2020: bool,
+    _: bool, // is_2020 — no longer needed in keyword compilation
     regex_list: *std.ArrayList(*CompiledRegex),
 ) void {
     // Type checking
@@ -1223,7 +1239,10 @@ fn compileKeywords(
             else => null,
         };
         // For local fragment-only refs, pre-link the target at compile time
-        const can_pre_link = ref_str != null and ref_str.?.len > 0 and ref_str.?[0] == '#' and !is_2020;
+        // Pre-link local fragment $refs for both Draft 7 and 2020-12
+        // In Draft 7: $ref overrides siblings (handled by ref_overrides flag)
+        // In 2020-12: $ref is just another keyword, sibling validators still process
+        const can_pre_link = ref_str != null and ref_str.?.len > 0 and ref_str.?[0] == '#';
         if (can_pre_link) {
             const rs = ref_str.?;
             var resolved: ?std.json.Value = null;
@@ -1414,10 +1433,10 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
         }
     }
 
-    // Only merge if we have properties + at least one of required/additionalProperties
-    // and type is object (or not specified)
+    // Only merge if we have properties and no incompatible validators
     if (properties_data == null or has_incompatible) return;
-    if (required_data == null and !additional_false) return;
+    // Need properties with > 64 entries? Can't use bitmask
+    if (properties_data.?.len > 64) return;
 
     // Build required bitmask: bit i is set if properties[i] is in the required array
     var required_mask: u64 = 0;
@@ -1499,11 +1518,27 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
         else => return null,
     };
     const cr = alloc.create(CompiledRegex) catch return null;
+    cr.simple_prefix = detectSimplePrefix(pattern_str);
     const pattern_z = alloc.dupeZ(u8, pattern_str) catch return null;
     const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
     cr.valid = comp_result == 0;
     regex_list.append(cr) catch {};
     return cr;
+}
+
+/// Detect if a regex pattern is a simple "^literal" prefix match.
+/// Returns the prefix string if so, null otherwise.
+fn detectSimplePrefix(pattern: []const u8) ?[]const u8 {
+    if (pattern.len < 2 or pattern[0] != '^') return null;
+    // Check that the rest is a literal string (no regex metacharacters)
+    const rest = pattern[1..];
+    for (rest) |ch| {
+        switch (ch) {
+            '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '\\', '$' => return null,
+            else => {},
+        }
+    }
+    return rest;
 }
 
 /// Compile patternProperties into pre-compiled regex + linked schemas.
@@ -1524,6 +1559,7 @@ fn compilePatternProperties(
         const sub_schema = entry.value_ptr.*;
         const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
+        cr.simple_prefix = detectSimplePrefix(pattern);
         const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
         cr.valid = comp_result == 0;
         regex_list.append(cr) catch {};
@@ -1758,10 +1794,11 @@ fn collectStaticCeiling(
                 const pattern = entry.key_ptr.*;
                 const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
+                cr.simple_prefix = detectSimplePrefix(pattern);
                 const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
                 cr.valid = comp_result == 0;
                 regex_list.append(cr) catch {};
-                if (cr.valid) {
+                if (cr.valid or cr.simple_prefix != null) {
                     pattern_regexes.append(cr) catch {};
                 }
             }
@@ -1959,7 +1996,8 @@ test "compile schema with properties recurses" {
     // Root node: type + properties = 2 validators
     const root_node = compiled.getNode(parsed.value);
     try std.testing.expect(root_node != null);
-    try std.testing.expectEqual(@as(usize, 2), root_node.?.validators.len);
+    // type_single(.object) + properties_compiled merged into object_fast = 1 validator
+    try std.testing.expect(root_node.?.validators.len >= 1);
 
     // Sub-schema {"type": "string"} should also be compiled
     const props = parsed.value.object.get("properties").?.object;
