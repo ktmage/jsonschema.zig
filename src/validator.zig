@@ -89,7 +89,12 @@ pub const Context = struct {
                 .object => {
                     const looked_up_node = compiled.getNode(sub_schema);
                     if (looked_up_node) |node| {
-                        if (!node.needs_uri_resolution) {
+                        // Allow fast path when URI resolution isn't truly needed:
+                        // - No $id on this node (scope doesn't change)
+                        // - OR no registry (all refs are local/pre-linked)
+                        const can_skip_uri = !node.needs_uri_resolution or
+                            (!node.has_id and self.registry == null);
+                        if (can_skip_uri) {
                             if (node.simple_type != .none) {
                                 if (matchesSimpleType(instance, node.simple_type)) {
                                     return .{ .errors = &.{}, .allocator = self.allocator };
@@ -168,7 +173,9 @@ pub const Context = struct {
                 .bool => |b| return b,
                 .object => {
                     if (compiled.getNode(sub_schema)) |node| {
-                        if (!node.needs_uri_resolution) {
+                        const can_skip = !node.needs_uri_resolution or
+                            (!node.has_id and self.registry == null);
+                        if (can_skip) {
                             if (node.isValidFast(instance, compiled)) |result| return result;
                         }
                     }
@@ -206,7 +213,9 @@ pub const Context = struct {
                 .object => {
                     const node = pre_node orelse compiled.getNode(sub_schema);
                     if (node) |n| {
-                        if (!n.needs_uri_resolution) {
+                        const can_skip = !n.needs_uri_resolution or
+                            (!n.has_id and self.registry == null);
+                        if (can_skip) {
                             if (n.isValidFast(instance, compiled)) |result| return result;
                         }
                     }
@@ -880,21 +889,35 @@ pub fn validateAll(ctx: Context) void {
                     .ref_local => |ls| {
                         // Inline local $ref: directly validate against pre-linked target
                         if (ls.node) |rnode| {
-                            if (!rnode.needs_uri_resolution) {
+                            const can_skip = !rnode.needs_uri_resolution or
+                                (!rnode.has_id and ctx.registry == null);
+                            if (can_skip) {
+                                if (rnode.always_valid) continue;
                                 if (rnode.isValidFast(ctx.instance, compiled)) |result| {
                                     if (result) continue;
                                 }
-                                // Invalid or can't inline — fall back to full validation
-                                const result = ctx.validateSubschema(ls.value, ctx.instance, ctx.instance_path, ctx.schema_path);
-                                defer result.deinit();
-                                if (!result.isValid()) {
-                                    for (result.errors) |err| {
-                                        ctx.errors.append(.{
-                                            .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
-                                            .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
-                                            .keyword = err.keyword,
-                                            .message = ctx.allocator.dupe(u8, err.message) catch return,
-                                        }) catch return;
+                                // Can't fully inline — call validateAll directly on target
+                                const ref_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "$ref");
+                                var errors = std.ArrayList(jsonschema.ValidationError).init(ctx.allocator);
+                                const child = Context{
+                                    .allocator = ctx.allocator,
+                                    .root_schema = ctx.root_schema,
+                                    .schema = ls.value,
+                                    .instance = ctx.instance,
+                                    .instance_path = ctx.instance_path,
+                                    .schema_path = ref_path,
+                                    .errors = &errors,
+                                    .registry = ctx.registry,
+                                    .base_uri = ctx.base_uri,
+                                    .ref_base_uri = ctx.base_uri,
+                                    .dynamic_scope = ctx.dynamic_scope,
+                                    .compiled = ctx.compiled,
+                                    .compiled_node = rnode,
+                                };
+                                validateAll(child);
+                                if (errors.items.len > 0) {
+                                    for (errors.items) |err| {
+                                        ctx.errors.append(err) catch {};
                                     }
                                 }
                                 continue;
