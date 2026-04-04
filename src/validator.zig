@@ -784,6 +784,110 @@ pub fn validateAll(ctx: Context) void {
                         }
                         @import("keywords/items.zig").validate(ctx);
                     },
+                    .object_fast => |of| {
+                        // Combined type + required + properties + additionalProperties in one pass
+                        const inst_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => {
+                                if (of.has_type_object) {
+                                    ctx.addError("type", "Instance does not match the expected type");
+                                }
+                                continue;
+                            },
+                        };
+                        if (ctx.evaluated_props == null) {
+                            var present_count: usize = 0;
+                            var need_slow = false;
+                            for (of.properties) |entry| {
+                                if (inst_obj.get(entry.name)) |inst_val| {
+                                    present_count += 1;
+                                    if (entry.schema.node) |enode| {
+                                        if (!enode.needs_uri_resolution) {
+                                            if (enode.isValidFast(inst_val, compiled)) |result| {
+                                                if (result) continue;
+                                            }
+                                        }
+                                    }
+                                    need_slow = true;
+                                    break;
+                                }
+                            }
+                            if (!need_slow) {
+                                // Check required
+                                var req_ok = true;
+                                for (of.required) |req_name| {
+                                    if (inst_obj.get(req_name) == null) {
+                                        req_ok = false;
+                                        break;
+                                    }
+                                }
+                                if (req_ok) {
+                                    // Check additional properties
+                                    if (!of.additional_false or inst_obj.count() <= present_count) {
+                                        continue; // All good!
+                                    }
+                                }
+                            }
+                        }
+                        // Slow path: dispatch individual validators
+                        // Reconstruct individual validation
+                        for (of.properties) |entry| {
+                            const inst_val = inst_obj.get(entry.name) orelse continue;
+                            if (ctx.evaluated_props) |ep| ep.put(entry.name, {}) catch {};
+                            if (ctx.compiled) |cc| {
+                                if (cc.getNode(entry.schema.value)) |lnode| {
+                                    if (lnode.isValidFast(inst_val, cc)) |result| {
+                                        if (result) continue;
+                                    } else {
+                                        if (ctx.isSubschemaValidWithNode(entry.schema.value, inst_val, lnode)) continue;
+                                    }
+                                }
+                            }
+                            const base_sp = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "properties");
+                            const prop_sp = @import("json_pointer.zig").appendProperty(ctx.allocator, base_sp, entry.name);
+                            const prop_ip = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.instance_path, entry.name);
+                            const result = ctx.validateSubschema(entry.schema.value, inst_val, prop_ip, prop_sp);
+                            defer result.deinit();
+                            if (!result.isValid()) {
+                                for (result.errors) |err| {
+                                    ctx.errors.append(.{
+                                        .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
+                                        .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
+                                        .keyword = err.keyword,
+                                        .message = ctx.allocator.dupe(u8, err.message) catch return,
+                                    }) catch return;
+                                }
+                            }
+                        }
+                        // Required
+                        for (of.required) |req_name| {
+                            if (inst_obj.get(req_name) == null) {
+                                const msg = std.fmt.allocPrint(ctx.allocator, "Required property '{s}' is missing", .{req_name}) catch continue;
+                                ctx.addError("required", msg);
+                            }
+                        }
+                        // Additional properties
+                        if (of.additional_false) {
+                            var ap_covered: usize = 0;
+                            for (of.properties) |entry| {
+                                if (inst_obj.get(entry.name) != null) ap_covered += 1;
+                            }
+                            if (inst_obj.count() > ap_covered) {
+                                var it = inst_obj.iterator();
+                                while (it.next()) |entry| {
+                                    const pn = entry.key_ptr.*;
+                                    var found = false;
+                                    for (of.properties) |pe| {
+                                        if (std.mem.eql(u8, pn, pe.name)) { found = true; break; }
+                                    }
+                                    if (!found) {
+                                        const msg = std.fmt.allocPrint(ctx.allocator, "Additional property '{s}' is not allowed", .{pn}) catch continue;
+                                        ctx.addError("additionalProperties", msg);
+                                    }
+                                }
+                            }
+                        }
+                    },
                     .ref_local => |ls| {
                         // Inline local $ref: directly validate against pre-linked target
                         if (ls.node) |rnode| {

@@ -196,6 +196,15 @@ pub const CompiledValidator = union(enum) {
         prefix_count: usize,
     },
 
+    // Combined object validator: type + required + properties + additionalProperties: false
+    // Handles the common pattern in a single pass to reduce hashmap lookups.
+    object_fast: struct {
+        properties: []const PropertyEntry,
+        required: []const []const u8,
+        additional_false: bool,
+        has_type_object: bool,
+    },
+
     // Pre-linked local $ref (fragment-only, no registry needed)
     ref_local: LinkedSchema,
 
@@ -485,6 +494,30 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             }
             return true;
         },
+        .object_fast => |of| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return if (of.has_type_object) false else true,
+            };
+            // Single-pass: check each schema property against instance
+            var present_count: usize = 0;
+            for (of.properties) |entry| {
+                if (obj.get(entry.name)) |inst_val| {
+                    present_count += 1;
+                    // Validate property value against schema
+                    const result = validateLinkedSchema(entry.schema, inst_val, compiled) orelse return null;
+                    if (!result) return false;
+                } else {
+                    // Check if this missing property is required
+                    for (of.required) |req_name| {
+                        if (std.mem.eql(u8, entry.name, req_name)) return false;
+                    }
+                }
+            }
+            // Check additionalProperties: false
+            if (of.additional_false and obj.count() > present_count) return false;
+            return true;
+        },
         .ref_local => |ls| {
             return validateLinkedSchema(ls, instance, compiled);
         },
@@ -715,6 +748,9 @@ fn compileNode(
             var validators = std.ArrayList(CompiledValidator).init(alloc);
             if (!ref_overrides) {
                 compileKeywords(alloc, obj, root_schema, &validators, validation_vocab_disabled, node_map, is_2020, regex_list);
+                // Post-process: merge type_single(.object) + required + properties_compiled + additional_properties_false
+                // into a single object_fast validator to reduce hashmap lookups
+                tryMergeObjectFast(alloc, &validators);
             }
 
             // 4. Pre-compute unevaluatedProperties ceiling if present.
@@ -1242,6 +1278,88 @@ fn tryBuildDiscriminatorMap(
         return entries.toOwnedSlice() catch null;
     }
     return null;
+}
+
+/// Try to merge separate type(.object) + required + properties_compiled + additional_properties_false
+/// validators into a single object_fast validator for reduced per-validation overhead.
+fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValidator)) void {
+    // Check if we have the right pattern: type_single(.object), required, properties_compiled, additional_properties_false
+    // with no other validators that could conflict (no generic, no unevaluated, etc.)
+    var has_type_object = false;
+    var type_idx: ?usize = null;
+    var required_data: ?[]const []const u8 = null;
+    var required_idx: ?usize = null;
+    var properties_data: ?[]const PropertyEntry = null;
+    var properties_idx: ?usize = null;
+    var additional_false = false;
+    var additional_idx: ?usize = null;
+    var has_incompatible = false;
+
+    for (validators.items, 0..) |v, i| {
+        switch (v) {
+            .type_single => |st| {
+                if (st == .object) {
+                    has_type_object = true;
+                    type_idx = i;
+                }
+            },
+            .required => |r| {
+                required_data = r;
+                required_idx = i;
+            },
+            .properties_compiled => |p| {
+                properties_data = p;
+                properties_idx = i;
+            },
+            .additional_properties_false => |_| {
+                additional_false = true;
+                additional_idx = i;
+            },
+            // These validators are compatible — they can stay alongside object_fast
+            .minimum, .maximum, .exclusive_minimum, .exclusive_maximum,
+            .multiple_of, .min_length, .max_length, .min_items, .max_items,
+            .min_properties, .max_properties, .enum_check, .const_check,
+            .type_multi, .items_compiled,
+            => {},
+            // Incompatible — can't merge
+            else => {
+                has_incompatible = true;
+            },
+        }
+    }
+
+    // Only merge if we have properties + at least one of required/additionalProperties
+    // and type is object (or not specified)
+    if (properties_data == null or has_incompatible) return;
+    if (required_data == null and !additional_false) return;
+
+    // Build the merged validator
+    const merged = CompiledValidator{ .object_fast = .{
+        .properties = properties_data.?,
+        .required = required_data orelse &.{},
+        .additional_false = additional_false,
+        .has_type_object = has_type_object,
+    } };
+
+    // Remove the merged validators (in reverse order to preserve indices)
+    var indices_to_remove = std.ArrayList(usize).init(alloc);
+    if (type_idx) |idx| indices_to_remove.append(idx) catch {};
+    if (required_idx) |idx| indices_to_remove.append(idx) catch {};
+    if (properties_idx) |idx| indices_to_remove.append(idx) catch {};
+    if (additional_idx) |idx| indices_to_remove.append(idx) catch {};
+
+    // Sort in reverse to remove from back to front
+    std.mem.sort(usize, indices_to_remove.items, {}, struct {
+        fn f(_: void, a: usize, b: usize) bool {
+            return a > b;
+        }
+    }.f);
+    for (indices_to_remove.items) |idx| {
+        _ = validators.orderedRemove(idx);
+    }
+
+    // Insert the merged validator at the front
+    validators.insert(0, merged) catch {};
 }
 
 /// Extract property names from a schema's "properties" keyword.
