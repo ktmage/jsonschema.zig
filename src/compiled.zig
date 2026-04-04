@@ -24,6 +24,8 @@ pub const CompiledSchema = struct {
     /// Pre-resolved local $ref targets (ref_string → resolved schema value).
     /// Eliminates repeated JSON pointer walks at validation time.
     local_ref_cache: std.StringHashMap(std.json.Value),
+    /// Pre-resolved $dynamicAnchor / $anchor map (anchor_name → schema value).
+    anchor_cache: std.StringHashMap(std.json.Value),
     /// Pre-compiled regex list for cleanup in deinit.
     compiled_regexes: []*CompiledRegex,
 
@@ -72,6 +74,10 @@ pub const CompiledSchema = struct {
         var local_ref_cache = std.StringHashMap(std.json.Value).init(alloc);
         buildLocalRefCache(schema, schema, &local_ref_cache);
 
+        // Pre-resolve all $anchor and $dynamicAnchor for fast lookup at runtime.
+        var anchor_cache = std.StringHashMap(std.json.Value).init(alloc);
+        buildAnchorCache(schema, &anchor_cache);
+
         return .{
             .arena = arena,
             .node_map = node_map,
@@ -79,6 +85,7 @@ pub const CompiledSchema = struct {
             .is_2020 = is_2020,
             .validation_vocab_disabled = validation_vocab_disabled,
             .local_ref_cache = local_ref_cache,
+            .anchor_cache = anchor_cache,
             .compiled_regexes = regex_list.toOwnedSlice() catch &.{},
         };
     }
@@ -106,6 +113,11 @@ pub const CompiledSchema = struct {
             }
             return null;
         };
+    }
+
+    /// Look up a pre-resolved $anchor or $dynamicAnchor.
+    pub fn resolveAnchor(self: *const CompiledSchema, anchor_name: []const u8) ?std.json.Value {
+        return self.anchor_cache.get(anchor_name);
     }
 
     pub fn deinit(self: *CompiledSchema) void {
@@ -2077,6 +2089,36 @@ fn buildLocalRefCache(
         .array => |arr| {
             for (arr.items) |item| {
                 buildLocalRefCache(root, item, cache);
+            }
+        },
+        else => {},
+    }
+}
+
+/// Pre-resolve all $anchor and $dynamicAnchor in the schema tree.
+fn buildAnchorCache(schema: std.json.Value, cache: *std.StringHashMap(std.json.Value)) void {
+    switch (schema) {
+        .object => |obj| {
+            // Check $anchor
+            if (obj.get("$anchor")) |a| {
+                if (a == .string) {
+                    cache.put(a.string, schema) catch {};
+                }
+            }
+            // Check $dynamicAnchor
+            if (obj.get("$dynamicAnchor")) |da| {
+                if (da == .string) {
+                    cache.put(da.string, schema) catch {};
+                }
+            }
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                buildAnchorCache(entry.value_ptr.*, cache);
+            }
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                buildAnchorCache(item, cache);
             }
         },
         else => {},

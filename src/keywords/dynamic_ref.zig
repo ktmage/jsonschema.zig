@@ -29,6 +29,17 @@ pub fn validate(ctx: Context) void {
     const fragment = getFragment(ref_str);
     if (fragment) |anchor_name| {
         if (hasDynamicAnchor(initial.schema, anchor_name)) {
+            // Fast path: use pre-computed anchor cache (O(1) instead of tree walk)
+            if (ctx.compiled) |comp| {
+                if (comp.resolveAnchor(anchor_name)) |anchor_schema| {
+                    if (hasDynamicAnchor(anchor_schema, anchor_name)) {
+                        const result = ctx.validateSubschema(anchor_schema, ctx.instance, ctx.instance_path, schema_path);
+                        defer result.deinit();
+                        appendErrors(ctx, result);
+                        return;
+                    }
+                }
+            }
             // Walk the dynamic scope to find the first (outermost) schema resource
             // that has a $dynamicAnchor with this name
             if (ctx.dynamic_scope) |ds| {
@@ -112,7 +123,19 @@ const ResolveResult = struct {
 };
 
 fn resolveInitial(ctx: Context, ref_str: []const u8) ?ResolveResult {
-    // Try registry first
+    // Try compiled anchor cache first (O(1) lookup instead of tree walk)
+    if (ctx.compiled) |comp| {
+        if (comp.resolveLocalRef(ref_str)) |s| {
+            return .{ .schema = s, .root = ctx.root_schema, .base_uri = ctx.base_uri };
+        }
+        if (ref_str.len > 1 and ref_str[0] == '#' and ref_str[1] != '/') {
+            if (comp.resolveAnchor(ref_str[1..])) |s| {
+                return .{ .schema = s, .root = ctx.root_schema, .base_uri = ctx.base_uri };
+            }
+        }
+    }
+
+    // Try registry
     if (ctx.registry) |reg| {
         if (reg.resolveWithRoot(ctx.root_schema, ctx.base_uri, ref_str)) |res| {
             return .{ .schema = res.schema, .root = res.root, .base_uri = res.base_uri };
@@ -127,7 +150,7 @@ fn resolveInitial(ctx: Context, ref_str: []const u8) ?ResolveResult {
                 return .{ .schema = s, .root = ctx.root_schema, .base_uri = ctx.base_uri };
             }
         }
-        // Try as anchor
+        // Try as anchor (tree walk fallback)
         if (ref_str.len > 1) {
             const anchor_name = ref_str[1..];
             if (findAnchorInSchema(ctx.root_schema, anchor_name)) |s| {
