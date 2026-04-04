@@ -707,6 +707,20 @@ fn validateNestedArray(instance: std.json.Value, inner_type: SimpleType, min_ite
     return true;
 }
 
+/// Check if all $ref in the validators are pre-linked (ref_local).
+fn allRefsPreLinked(validators: []const CompiledValidator) bool {
+    for (validators) |v| {
+        switch (v) {
+            .generic => |g| {
+                if (std.mem.eql(u8, g.keyword_name, "$ref")) return false;
+            },
+            .ref_local => {},
+            else => {},
+        }
+    }
+    return true;
+}
+
 /// Check if validators always pass (no-op schema).
 fn isAlwaysValid(validators: []const CompiledValidator) bool {
     for (validators) |v| {
@@ -762,15 +776,10 @@ fn optimizeRefResolution(root_schema: std.json.Value, node_map: *const CompiledS
     while (it.next()) |entry| {
         const node = entry.value_ptr.*;
         if (!node.needs_uri_resolution) continue;
-        // Find the original schema object to check for $ref and $id
-        // We can't easily get the schema from the node, so scan all validators
-        // for a .generic with keyword_name "$ref" — if present, it's a 2020-12 $ref
-        // For ref_overrides (Draft 7), the validators list is empty.
         for (node.validators) |v| {
             switch (v) {
                 .generic => |g| {
-                    if (g.keyword_name.ptr == "$ref".ptr) {
-                        // Try to resolve the $ref target
+                    if (g.keyword_name.ptr == "$ref".ptr or std.mem.eql(u8, g.keyword_name, "$ref")) {
                         const ref_str = switch (g.keyword_value) {
                             .string => |s| s,
                             else => continue,
@@ -813,6 +822,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
 
 fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     if (ls.node) |node| {
+        if (node.always_valid) return true;
         if (node.needs_uri_resolution) return null;
         return node.isValidFast(instance, compiled);
     }
@@ -918,7 +928,7 @@ fn compileNode(
                 .validators = final_validators,
                 .ref_overrides = ref_overrides,
                 .simple_type = detectSimpleType(obj),
-                .always_valid = final_validators.len == 0 or isAlwaysValid(final_validators),
+                .always_valid = !ref_overrides and (final_validators.len == 0 or isAlwaysValid(final_validators)),
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
                 .has_unevaluated_properties = obj.get("unevaluatedProperties") != null,
                 .unevaluated_ceiling = unevaluated_ceiling,
