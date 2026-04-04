@@ -439,7 +439,7 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                         else => return null,
                     };
                     for (dmap) |entry| {
-                        if (std.mem.eql(u8, disc_str, entry.value)) {
+                        if (disc_str.len == entry.value.len and std.mem.eql(u8, disc_str, entry.value)) {
                             return validateLinkedSchema(entry.schema, instance, compiled);
                         }
                     }
@@ -1317,20 +1317,16 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
                 properties_data = p;
                 properties_idx = i;
             },
-            .additional_properties_false => |_| {
+            .additional_properties_false => {
                 additional_false = true;
                 additional_idx = i;
             },
-            // These validators are compatible — they can stay alongside object_fast
-            .minimum, .maximum, .exclusive_minimum, .exclusive_maximum,
-            .multiple_of, .min_length, .max_length, .min_items, .max_items,
-            .min_properties, .max_properties, .enum_check, .const_check,
-            .type_multi, .items_compiled,
-            => {},
-            // Incompatible — can't merge
-            else => {
+            // These overlap with object_fast logic — can't merge
+            .additional_properties_schema, .object_fast => {
                 has_incompatible = true;
             },
+            // Everything else is compatible (operates on different aspects)
+            else => {},
         }
     }
 
