@@ -197,10 +197,11 @@ pub const CompiledValidator = union(enum) {
     },
 
     // Combined object validator: type + required + properties + additionalProperties: false
-    // Handles the common pattern in a single pass to reduce hashmap lookups.
+    // Handles the common pattern in a single pass over instance keys/values,
+    // avoiding per-property hashmap lookups. Uses bitmask for required tracking.
     object_fast: struct {
         properties: []const PropertyEntry,
-        required: []const []const u8,
+        required_mask: u64, // bitmask: bit i set if properties[i] is required
         additional_false: bool,
         has_type_object: bool,
     },
@@ -499,23 +500,28 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 .object => |o| o,
                 else => return if (of.has_type_object) false else true,
             };
-            // Single-pass: check each schema property against instance
-            var present_count: usize = 0;
-            for (of.properties) |entry| {
-                if (obj.get(entry.name)) |inst_val| {
-                    present_count += 1;
-                    // Validate property value against schema
-                    const result = validateLinkedSchema(entry.schema, inst_val, compiled) orelse return null;
-                    if (!result) return false;
-                } else {
-                    // Check if this missing property is required
-                    for (of.required) |req_name| {
-                        if (std.mem.eql(u8, entry.name, req_name)) return false;
+            // Single-pass over instance key-value pairs (avoids hashmap lookups)
+            const keys = obj.keys();
+            const vals = obj.values();
+            var found_mask: u64 = 0;
+            var additional_count: usize = 0;
+            for (keys, vals) |key, val| {
+                var matched = false;
+                for (of.properties, 0..) |entry, pi| {
+                    if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
+                        found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                        const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                        if (!result) return false;
+                        matched = true;
+                        break;
                     }
                 }
+                if (!matched) additional_count += 1;
             }
             // Check additionalProperties: false
-            if (of.additional_false and obj.count() > present_count) return false;
+            if (of.additional_false and additional_count > 0) return false;
+            // Check required using bitmask
+            if (found_mask & of.required_mask != of.required_mask) return false;
             return true;
         },
         .ref_local => |ls| {
@@ -1333,10 +1339,39 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
     if (properties_data == null or has_incompatible) return;
     if (required_data == null and !additional_false) return;
 
+    // Build required bitmask: bit i is set if properties[i] is in the required array
+    var required_mask: u64 = 0;
+    if (required_data) |req_names| {
+        for (req_names) |req_name| {
+            for (properties_data.?, 0..) |entry, pi| {
+                if (pi >= 64) break;
+                if (std.mem.eql(u8, req_name, entry.name)) {
+                    required_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                    break;
+                }
+            }
+        }
+    }
+
+    // Don't merge if there are required properties NOT in the properties list
+    // (they wouldn't be caught by the bitmask check)
+    if (required_data) |req_names| {
+        for (req_names) |req_name| {
+            var in_props = false;
+            for (properties_data.?) |entry| {
+                if (std.mem.eql(u8, req_name, entry.name)) {
+                    in_props = true;
+                    break;
+                }
+            }
+            if (!in_props) return; // Can't merge — required name not in properties
+        }
+    }
+
     // Build the merged validator
     const merged = CompiledValidator{ .object_fast = .{
         .properties = properties_data.?,
-        .required = required_data orelse &.{},
+        .required_mask = required_mask,
         .additional_false = additional_false,
         .has_type_object = has_type_object,
     } };

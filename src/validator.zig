@@ -796,93 +796,82 @@ pub fn validateAll(ctx: Context) void {
                             },
                         };
                         if (ctx.evaluated_props == null) {
-                            var present_count: usize = 0;
+                            // Single-pass over instance keys/values (avoids hashmap lookups)
+                            const keys = inst_obj.keys();
+                            const vals = inst_obj.values();
+                            var found_mask: u64 = 0;
+                            var additional_count: usize = 0;
                             var need_slow = false;
-                            for (of.properties) |entry| {
-                                if (inst_obj.get(entry.name)) |inst_val| {
-                                    present_count += 1;
-                                    if (entry.schema.node) |enode| {
-                                        if (!enode.needs_uri_resolution) {
-                                            if (enode.isValidFast(inst_val, compiled)) |result| {
-                                                if (result) continue;
+                            for (keys, vals) |key, val| {
+                                var matched = false;
+                                for (of.properties, 0..) |entry, pi| {
+                                    if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
+                                        found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                                        if (entry.schema.node) |enode| {
+                                            if (!enode.needs_uri_resolution) {
+                                                if (enode.isValidFast(val, compiled)) |result| {
+                                                    if (result) { matched = true; break; }
+                                                }
                                             }
                                         }
-                                    }
-                                    need_slow = true;
-                                    break;
-                                }
-                            }
-                            if (!need_slow) {
-                                // Check required
-                                var req_ok = true;
-                                for (of.required) |req_name| {
-                                    if (inst_obj.get(req_name) == null) {
-                                        req_ok = false;
+                                        need_slow = true;
                                         break;
                                     }
                                 }
-                                if (req_ok) {
+                                if (!matched and !need_slow) additional_count += 1;
+                                if (need_slow) break;
+                            }
+                            if (!need_slow) {
+                                // Check required via bitmask
+                                if (found_mask & of.required_mask == of.required_mask) {
                                     // Check additional properties
-                                    if (!of.additional_false or inst_obj.count() <= present_count) {
-                                        continue; // All good!
+                                    if (!of.additional_false or additional_count == 0) {
+                                        continue; // All good — zero allocation fast path!
                                     }
                                 }
                             }
                         }
-                        // Slow path: dispatch individual validators
-                        // Reconstruct individual validation
-                        for (of.properties) |entry| {
-                            const inst_val = inst_obj.get(entry.name) orelse continue;
-                            if (ctx.evaluated_props) |ep| ep.put(entry.name, {}) catch {};
-                            if (ctx.compiled) |cc| {
-                                if (cc.getNode(entry.schema.value)) |lnode| {
-                                    if (lnode.isValidFast(inst_val, cc)) |result| {
-                                        if (result) continue;
-                                    } else {
-                                        if (ctx.isSubschemaValidWithNode(entry.schema.value, inst_val, lnode)) continue;
+                        // Slow path: use keys/values iteration for error reporting
+                        {
+                            const keys = inst_obj.keys();
+                            const vals = inst_obj.values();
+                            for (keys, vals) |key, val| {
+                                var matched = false;
+                                for (of.properties) |entry| {
+                                    if (std.mem.eql(u8, key, entry.name)) {
+                                        matched = true;
+                                        if (ctx.evaluated_props) |ep| ep.put(key, {}) catch {};
+                                        if (ctx.isSubschemaValidWithNode(entry.schema.value, val, entry.schema.node)) break;
+                                        const base_sp = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "properties");
+                                        const prop_sp = @import("json_pointer.zig").appendProperty(ctx.allocator, base_sp, entry.name);
+                                        const prop_ip = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.instance_path, key);
+                                        const result = ctx.validateSubschema(entry.schema.value, val, prop_ip, prop_sp);
+                                        defer result.deinit();
+                                        if (!result.isValid()) {
+                                            for (result.errors) |err| {
+                                                ctx.errors.append(.{
+                                                    .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
+                                                    .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
+                                                    .keyword = err.keyword,
+                                                    .message = ctx.allocator.dupe(u8, err.message) catch return,
+                                                }) catch return;
+                                            }
+                                        }
+                                        break;
                                     }
                                 }
-                            }
-                            const base_sp = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "properties");
-                            const prop_sp = @import("json_pointer.zig").appendProperty(ctx.allocator, base_sp, entry.name);
-                            const prop_ip = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.instance_path, entry.name);
-                            const result = ctx.validateSubschema(entry.schema.value, inst_val, prop_ip, prop_sp);
-                            defer result.deinit();
-                            if (!result.isValid()) {
-                                for (result.errors) |err| {
-                                    ctx.errors.append(.{
-                                        .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
-                                        .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
-                                        .keyword = err.keyword,
-                                        .message = ctx.allocator.dupe(u8, err.message) catch return,
-                                    }) catch return;
+                                if (!matched and of.additional_false) {
+                                    const msg = std.fmt.allocPrint(ctx.allocator, "Additional property '{s}' is not allowed", .{key}) catch continue;
+                                    ctx.addError("additionalProperties", msg);
                                 }
                             }
-                        }
-                        // Required
-                        for (of.required) |req_name| {
-                            if (inst_obj.get(req_name) == null) {
-                                const msg = std.fmt.allocPrint(ctx.allocator, "Required property '{s}' is missing", .{req_name}) catch continue;
-                                ctx.addError("required", msg);
-                            }
-                        }
-                        // Additional properties
-                        if (of.additional_false) {
-                            var ap_covered: usize = 0;
-                            for (of.properties) |entry| {
-                                if (inst_obj.get(entry.name) != null) ap_covered += 1;
-                            }
-                            if (inst_obj.count() > ap_covered) {
-                                var it = inst_obj.iterator();
-                                while (it.next()) |entry| {
-                                    const pn = entry.key_ptr.*;
-                                    var found = false;
-                                    for (of.properties) |pe| {
-                                        if (std.mem.eql(u8, pn, pe.name)) { found = true; break; }
-                                    }
-                                    if (!found) {
-                                        const msg = std.fmt.allocPrint(ctx.allocator, "Additional property '{s}' is not allowed", .{pn}) catch continue;
-                                        ctx.addError("additionalProperties", msg);
+                            // Check required
+                            for (of.properties, 0..) |entry, pi| {
+                                if (pi >= 64) break;
+                                if (of.required_mask & (@as(u64, 1) << @as(u6, @intCast(pi))) != 0) {
+                                    if (inst_obj.get(entry.name) == null) {
+                                        const msg = std.fmt.allocPrint(ctx.allocator, "Required property '{s}' is missing", .{entry.name}) catch continue;
+                                        ctx.addError("required", msg);
                                     }
                                 }
                             }
