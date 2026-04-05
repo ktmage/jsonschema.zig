@@ -8,6 +8,9 @@ const std = @import("std");
 /// Does NOT handle: alternation (|), backreferences, lookahead/lookbehind
 pub const FastRegex = struct {
     ops: []const Op,
+    fixed_width: u16 = 0,
+    min_width: u16 = 0,
+    max_width: u16 = 0,
 
     const Op = struct {
         /// 128-bit bitmap: all matching characters have their bit set.
@@ -185,11 +188,43 @@ pub const FastRegex = struct {
             ops.append(.{ .low = op_low, .high = op_high, .min = min, .max = max, .literal_char = lit_ch, .is_literal = is_lit }) catch return null;
         }
 
-        return FastRegex{ .ops = ops.toOwnedSlice() catch return null };
+        const final_ops = ops.toOwnedSlice() catch return null;
+        var fw: u16 = 0;
+        var min_w: u16 = 0;
+        var max_w: u16 = 0;
+        var is_fixed = true;
+        var has_unlimited = false;
+        for (final_ops) |op| {
+            min_w += op.min;
+            if (op.max == 0) { has_unlimited = true; } else { max_w += op.max; }
+            if (op.min != op.max or op.max == 0) { is_fixed = false; } else { fw += op.min; }
+        }
+        return FastRegex{
+            .ops = final_ops,
+            .fixed_width = if (is_fixed) fw else 0,
+            .min_width = min_w,
+            .max_width = if (has_unlimited) 0 else max_w,
+        };
     }
 
     /// Match the pattern against the full input string.
     pub fn matches(self: *const FastRegex, input: []const u8) bool {
+        // Quick length check
+        if (input.len < self.min_width) return false;
+        if (self.max_width > 0 and input.len > self.max_width) return false;
+        // Ultra-fast path: fixed-width patterns
+        if (self.fixed_width > 0) {
+            if (input.len != self.fixed_width) return false;
+            var pos: usize = 0;
+            for (self.ops) |op| {
+                var count: u16 = 0;
+                while (count < op.min) : (count += 1) {
+                    if (!op.matchChar(input[pos])) return false;
+                    pos += 1;
+                }
+            }
+            return true;
+        }
         return matchOps(self.ops, input, 0) != null;
     }
 
