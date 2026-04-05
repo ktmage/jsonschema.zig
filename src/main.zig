@@ -41,6 +41,34 @@ pub fn validate(
     return validateFull(allocator, schema, schema, instance, "", "", null, "", null, null);
 }
 
+/// Boolean-only validation: returns true/false without collecting errors.
+/// Uses isValidFast first (zero-allocation), falls back to full validation.
+pub fn isValidCompiled(
+    allocator: Allocator,
+    compiled: *const CompiledSchema,
+    instance: std.json.Value,
+) bool {
+    const schema = compiled.schema;
+    switch (schema) {
+        .bool => |b| return b,
+        .object => {},
+        else => return true,
+    }
+
+    // Try isValidFast first (zero-allocation)
+    if (compiled.getNode(schema)) |node| {
+        if (node.always_valid) return true;
+        const can_skip = !node.needs_uri_resolution or !node.has_id;
+        if (can_skip) {
+            if (node.isValidFast(instance, compiled)) |result| return result;
+        }
+    }
+
+    // Fallback: full validation
+    const result = validateCompiled(allocator, compiled, instance);
+    return result.isValid();
+}
+
 /// Validate an instance against a pre-compiled schema.
 /// This is the fast path for repeated validation against the same schema.
 pub fn validateCompiled(
