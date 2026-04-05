@@ -1145,6 +1145,20 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
         return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
     }
     if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
+    // Fast path: literal string set (case-insensitive, lowercase stored)
+    if (cr.literal_set) |lset| {
+        for (lset) |lit| {
+            if (instance_str.len == lit.len) {
+                var match = true;
+                for (instance_str, lit) |a, b| {
+                    const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+                    if (al != b) { match = false; break; }
+                }
+                if (match) return true;
+            }
+        }
+        return false;
+    }
     if (cr.ci_literal) |lit| {
         if (instance_str.len != lit.len) return false;
         for (instance_str, lit) |a, b| {
