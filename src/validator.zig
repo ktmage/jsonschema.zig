@@ -910,12 +910,17 @@ pub fn validateAll(ctx: Context) void {
                                     found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
                                     const entry = of.properties[pi];
                                     if (entry.schema.node) |enode| {
-                                        // Ultra-fast: inline simple_type check
                                         if (enode.always_valid) continue;
                                         if (enode.simple_type != .none) {
                                             if (matchesSimpleType(val, enode.simple_type)) continue;
-                                            need_slow = true;
-                                            break;
+                                            need_slow = true; break;
+                                        }
+                                        // Inline 1-validator patterns to skip isValidFast call
+                                        if (enode.ref_overrides and enode.validators.len == 1) {
+                                            if (compiled_mod.isValidatorValid(enode.validators[0], val, compiled)) |result| {
+                                                if (result) continue;
+                                            }
+                                            need_slow = true; break;
                                         }
                                         if (!enode.has_id or ctx.registry == null) {
                                             if (enode.isValidFast(val, compiled)) |result| {

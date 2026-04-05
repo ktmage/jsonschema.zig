@@ -469,7 +469,7 @@ pub const CompiledNode = struct {
 
 /// Check if a single compiled validator is valid for an instance.
 /// Returns null if the validator can't be inlined (caller must use full path).
-fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     switch (v) {
         .type_single => |st| {
             return Validator.matchesSimpleType(instance, st);
