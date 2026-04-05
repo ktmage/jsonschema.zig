@@ -204,7 +204,7 @@ pub const CompiledValidator = union(enum) {
         discriminator_map: ?[]const DiscriminatorEntry = null,
     },
     any_of_compiled: []const LinkedSchema,
-    not_compiled: LinkedSchema,
+    not_compiled: *const LinkedSchema,
     items_compiled: *const ItemsCompiled,
 
     // Combined object validator: type + required + properties + additionalProperties: false
@@ -220,7 +220,7 @@ pub const CompiledValidator = union(enum) {
     },
 
     // Pre-linked local $ref (fragment-only, no registry needed)
-    ref_local: LinkedSchema,
+    ref_local: *const LinkedSchema,
 
     // additionalProperties: false — pre-extracted allowed property names + optional pattern regexes
     additional_properties_false: struct {
@@ -244,7 +244,7 @@ pub const CompiledValidator = union(enum) {
     dependent_schemas_compiled: []const DependentSchemaEntry,
 
     // Compiled propertyNames: linked schema to validate property names against
-    property_names_compiled: LinkedSchema,
+    property_names_compiled: *const LinkedSchema,
 
     contains_compiled: *const ContainsCompiled,
 
@@ -666,7 +666,7 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             return false;
         },
         .not_compiled => |ls| {
-            const result = validateLinkedSchema(ls, instance, compiled) orelse return null;
+            const result = validateLinkedSchema(ls.*, instance, compiled) orelse return null;
             return !result;
         },
         .items_compiled => |ic| {
@@ -760,7 +760,7 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             return true;
         },
         .ref_local => |ls| {
-            return validateLinkedSchema(ls, instance, compiled);
+            return validateLinkedSchema(ls.*, instance, compiled);
         },
         .additional_properties_false => |ap| {
             const obj = switch (instance) {
@@ -925,7 +925,8 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             }
             return true;
         },
-        .property_names_compiled => |ls| {
+        .property_names_compiled => |ls_ptr| {
+            const ls = ls_ptr.*;
             const obj = switch (instance) {
                 .object => |o| o,
                 else => return true,
@@ -1353,7 +1354,12 @@ fn compileNode(
                             var resolved: ?std.json.Value = null;
                             if (rs.len == 1) resolved = root_schema
                             else if (rs.len >= 2 and rs[1] == '/') resolved = @import("schema_registry.zig").resolvePointer(root_schema, rs[2..]);
-                            if (resolved) |r| validators.append(.{ .ref_local = linkSchema(node_map, r) }) catch {};
+                            if (resolved) |r| {
+                                if (alloc.create(LinkedSchema)) |ls| {
+                                    ls.* = linkSchema(node_map, r);
+                                    validators.append(.{ .ref_local = ls }) catch {};
+                                } else |_| {}
+                            }
                         }
                     }
                 }
@@ -1723,7 +1729,7 @@ fn compileKeywords(
         }
     }
     if (obj.get("propertyNames")) |kv| {
-        validators.append(.{ .property_names_compiled = linkSchema(node_map, kv) }) catch {};
+        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(.{ .property_names_compiled = ls }) catch {}; } else |_| {}
     }
     if (obj.get("dependencies")) |kv| {
         validators.append(makeGeneric(alloc, @import("keywords/dependencies.zig").validate, kv, "dependencies")) catch {};
@@ -1842,7 +1848,7 @@ fn compileKeywords(
         }
     }
     if (obj.get("not")) |kv| {
-        validators.append(.{ .not_compiled = linkSchema(node_map, kv) }) catch {};
+        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(.{ .not_compiled = ls }) catch {}; } else |_| {}
     }
 
     // Reference
@@ -1865,7 +1871,10 @@ fn compileKeywords(
                 resolved = @import("schema_registry.zig").resolvePointer(root_schema, rs[2..]);
             }
             if (resolved) |r| {
-                validators.append(.{ .ref_local = linkSchema(node_map, r) }) catch {};
+                if (alloc.create(LinkedSchema)) |ls| {
+                    ls.* = linkSchema(node_map, r);
+                    validators.append(.{ .ref_local = ls }) catch {};
+                } else |_| {}
             } else {
                 validators.append(makeGeneric(alloc, @import("keywords/ref.zig").validate, kv, "$ref")) catch {};
             }
