@@ -674,11 +674,19 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             var found_mask: u64 = 0;
             var additional_count: usize = 0;
             if (of.property_map) |pmap| {
-                // O(1) property lookup via hashmap (for large schemas)
                 for (keys, vals) |key, val| {
                     if (pmap.get(key)) |pi| {
                         found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
-                        const result = validateLinkedSchema(of.properties[pi].schema, val, compiled) orelse return null;
+                        const ls = of.properties[pi].schema;
+                        // Ultra-fast: inline simple_type
+                        if (ls.node) |n| {
+                            if (n.always_valid) continue;
+                            if (n.simple_type != .none) {
+                                if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
+                                continue;
+                            }
+                        }
+                        const result = validateLinkedSchema(ls, val, compiled) orelse return null;
                         if (!result) return false;
                     } else {
                         additional_count += 1;
@@ -691,6 +699,15 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                     for (of.properties, 0..) |entry, pi| {
                         if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
                             found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                            // Ultra-fast: inline simple_type
+                            if (entry.schema.node) |n| {
+                                if (n.always_valid) { matched = true; break; }
+                                if (n.simple_type != .none) {
+                                    if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
+                                    matched = true;
+                                    break;
+                                }
+                            }
                             const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
                             if (!result) return false;
                             matched = true;

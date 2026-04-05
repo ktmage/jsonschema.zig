@@ -906,6 +906,13 @@ pub fn validateAll(ctx: Context) void {
                                     found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
                                     const entry = of.properties[pi];
                                     if (entry.schema.node) |enode| {
+                                        // Ultra-fast: inline simple_type check
+                                        if (enode.always_valid) continue;
+                                        if (enode.simple_type != .none) {
+                                            if (matchesSimpleType(val, enode.simple_type)) continue;
+                                            need_slow = true;
+                                            break;
+                                        }
                                         const can_skip_of = !enode.needs_uri_resolution or
                                             (!enode.has_id and ctx.registry == null);
                                         if (can_skip_of) {
