@@ -122,48 +122,68 @@ pub const FastRegex = struct {
         return matchOps(self.ops, input, 0) != null;
     }
 
-    /// Try to match ops starting at input[pos]. Returns end position or null.
-    /// Uses backtracking for greedy quantifiers when subsequent ops fail.
+    /// Try to match ops against input. Stack-based backtracking (no recursion).
     fn matchOps(ops: []const Op, input: []const u8, start: usize) ?usize {
-        return matchOpsAt(ops, input, start, 0);
-    }
+        const BacktrackEntry = struct { op_idx: u16, pos: u16, greedy_start: u16 };
+        var stack: [64]BacktrackEntry = undefined;
+        var stack_len: usize = 0;
+        var pos: usize = start;
+        var oi: usize = 0;
 
-    fn matchOpsAt(ops: []const Op, input: []const u8, start: usize, op_idx: usize) ?usize {
-        var pos = start;
-        var oi = op_idx;
-        while (oi < ops.len) {
-            const op = ops[oi];
-            // Match minimum required
-            var count: u16 = 0;
-            while (count < op.min) {
-                if (pos >= input.len) return null;
-                if (!matchOne(op.kind, input[pos])) return null;
-                pos += 1;
-                count += 1;
-            }
-            // Greedy: match as many as possible, then backtrack if needed
-            const greedy_start = pos;
-            if (op.max == 0) {
-                while (pos < input.len and matchOne(op.kind, input[pos])) pos += 1;
-            } else {
-                while (count < op.max and pos < input.len and matchOne(op.kind, input[pos])) {
+        while (true) {
+            // Forward phase: match ops greedily
+            while (oi < ops.len) {
+                const op = ops[oi];
+                // Match minimum
+                var ok = true;
+                var count: u16 = 0;
+                while (count < op.min) {
+                    if (pos >= input.len or !matchOne(op.kind, input[pos])) { ok = false; break; }
                     pos += 1;
                     count += 1;
                 }
-            }
-            // Try remaining ops from current pos, backtracking on failure
-            if (oi + 1 < ops.len) {
-                var try_pos = pos;
-                while (try_pos >= greedy_start) {
-                    if (matchOpsAt(ops, input, try_pos, oi + 1)) |end| return end;
-                    if (try_pos == greedy_start) break;
-                    try_pos -= 1;
+                if (!ok) break; // backtrack
+
+                // Greedy: match maximum
+                const greedy_start = pos;
+                if (op.max == 0) {
+                    while (pos < input.len and matchOne(op.kind, input[pos])) pos += 1;
+                } else {
+                    while (count < op.max and pos < input.len and matchOne(op.kind, input[pos])) { pos += 1; count += 1; }
                 }
-                return null;
+
+                // Push backtrack point if greedy consumed extra chars
+                if (pos > greedy_start and oi + 1 < ops.len and stack_len < 64) {
+                    stack[stack_len] = .{
+                        .op_idx = @intCast(oi),
+                        .pos = @intCast(pos - 1), // try one less
+                        .greedy_start = @intCast(greedy_start),
+                    };
+                    stack_len += 1;
+                }
+                oi += 1;
             }
-            oi += 1;
+
+            // Check success
+            if (oi >= ops.len and pos == input.len) return pos;
+
+            // Backtrack
+            if (stack_len == 0) return null;
+            stack_len -= 1;
+            const bt = stack[stack_len];
+            pos = bt.pos;
+            oi = bt.op_idx + 1; // continue with next op from backtracked position
+
+            // If we can backtrack further (pos > greedy_start), push another entry
+            if (pos > bt.greedy_start and stack_len < 64) {
+                stack[stack_len] = .{
+                    .op_idx = bt.op_idx,
+                    .pos = @intCast(pos - 1),
+                    .greedy_start = bt.greedy_start,
+                };
+                stack_len += 1;
+            }
         }
-        return if (pos == input.len) pos else null;
     }
 
     fn matchOne(kind: Kind, ch: u8) bool {
