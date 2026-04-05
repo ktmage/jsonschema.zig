@@ -122,8 +122,72 @@ pub const FastRegex = struct {
         return matchOps(self.ops, input, 0) != null;
     }
 
-    /// Try to match ops against input. Stack-based backtracking (no recursion).
+    /// Try to match ops against input.
+    /// Uses optimized forward scan: for greedy+literal pairs, remember the last
+    /// position where the literal could match to avoid backtracking entirely.
     fn matchOps(ops: []const Op, input: []const u8, start: usize) ?usize {
+        // Try optimized single-pass first (no backtracking needed for most patterns)
+        if (matchOpsOptimized(ops, input, start)) |end| return end;
+        return matchOpsBacktrack(ops, input, start);
+    }
+
+    /// Optimized single-pass matcher. For each greedy op followed by a literal,
+    /// track the last valid split position during the forward scan.
+    fn matchOpsOptimized(ops: []const Op, input: []const u8, start: usize) ?usize {
+        var pos = start;
+        var oi: usize = 0;
+        while (oi < ops.len) {
+            const op = ops[oi];
+            // Match minimum
+            var count: u16 = 0;
+            while (count < op.min) {
+                if (pos >= input.len or !matchOne(op.kind, input[pos])) return null;
+                pos += 1;
+                count += 1;
+            }
+            // Check if next op is a literal (optimize greedy+literal)
+            const has_next_lit = oi + 1 < ops.len and ops[oi + 1].kind == .literal;
+            if (has_next_lit and (op.max == 0 or op.max > op.min)) {
+                const next_lit = ops[oi + 1].kind.literal;
+                // Forward scan: track last position where next_lit occurs
+                var last_lit_pos: ?usize = null;
+                var scan_pos = pos;
+                if (op.max == 0) {
+                    while (scan_pos < input.len and matchOne(op.kind, input[scan_pos])) {
+                        if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
+                        scan_pos += 1;
+                    }
+                } else {
+                    while (count < op.max and scan_pos < input.len and matchOne(op.kind, input[scan_pos])) {
+                        if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
+                        scan_pos += 1;
+                        count += 1;
+                    }
+                }
+                // If the char right after greedy range IS the literal, use it
+                if (scan_pos < input.len and input[scan_pos] == next_lit) {
+                    pos = scan_pos;
+                } else if (last_lit_pos) |lp| {
+                    pos = lp; // jump to last occurrence of literal in greedy range
+                } else {
+                    return null; // literal not found
+                }
+                oi += 1; // skip the greedy op, pos is at the literal
+                continue;
+            }
+            // Standard greedy (no literal follows)
+            if (op.max == 0) {
+                while (pos < input.len and matchOne(op.kind, input[pos])) pos += 1;
+            } else {
+                while (count < op.max and pos < input.len and matchOne(op.kind, input[pos])) { pos += 1; count += 1; }
+            }
+            oi += 1;
+        }
+        return if (pos == input.len) pos else null;
+    }
+
+    /// Fallback with full backtracking for patterns not handled by optimized path.
+    fn matchOpsBacktrack(ops: []const Op, input: []const u8, start: usize) ?usize {
         const BacktrackEntry = struct { op_idx: u16, pos: u16, greedy_start: u16 };
         var stack: [64]BacktrackEntry = undefined;
         var stack_len: usize = 0;
