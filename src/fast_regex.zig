@@ -228,27 +228,24 @@ pub const FastRegex = struct {
                         while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
                     }
                 } else {
-                    // Literal IN class: forward scan tracking last literal position
-                    var last_lit_pos: ?usize = null;
-                    var scan_pos = pos;
+                    // Literal IN class: greedy scan then reverse search for literal
+                    const greedy_start = pos;
                     if (op.max == 0) {
-                        while (scan_pos < input.len and op.matchChar(input[scan_pos])) {
-                            if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
-                            scan_pos += 1;
-                        }
+                        while (pos < input.len and op.matchChar(input[pos])) pos += 1;
                     } else {
-                        while (count < op.max and scan_pos < input.len and op.matchChar(input[scan_pos])) {
-                            if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
-                            scan_pos += 1;
-                            count += 1;
-                        }
+                        while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
                     }
-                    if (scan_pos < input.len and input[scan_pos] == next_lit) {
-                        pos = scan_pos;
-                    } else if (last_lit_pos) |lp| {
-                        pos = lp;
+                    // Check if literal is right after greedy range
+                    if (pos < input.len and input[pos] == next_lit) {
+                        // Greedy stopped before literal — use it directly
                     } else {
-                        return null;
+                        // Reverse scan from end of greedy range to find last literal
+                        var found = false;
+                        while (pos > greedy_start) {
+                            pos -= 1;
+                            if (input[pos] == next_lit) { found = true; break; }
+                        }
+                        if (!found) return null;
                     }
                 }
                 oi += 1;
