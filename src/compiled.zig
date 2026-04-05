@@ -363,9 +363,17 @@ pub const CompiledRegex = struct {
         }
         // Fast path: identifier pattern
         if (self.is_identifier) return matchesIdentifierPattern(str);
-        // Fast path: character class bitmap (only for isValidFast, not matches)
         // Regex path: need null-terminated string
         if (!self.valid) return false;
+        // Fast path: literal string set (e.g., ^(include|exclude)$)
+        if (self.literal_set) |lset| {
+            for (lset) |lit| {
+                if (str.len == lit.len and std.mem.eql(u8, str, lit)) return true;
+            }
+            return false;
+        }
+        // Fast path: character class bitmap
+        if (self.char_class) |bm| return matchesCharClass(str, bm, self.char_class_mode);
         if (allocator) |alloc| {
             const str_z = alloc.dupeZ(u8, str) catch return false;
             return c.regexec(&self.regex, str_z.ptr, 0, null, 0) == 0;
@@ -2888,7 +2896,19 @@ fn compilePatternProperties(
         const sub_schema = entry.value_ptr.*;
         const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
-        cr.simple_prefix = detectSimplePrefix(pattern);
+        cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
+        cr.is_identifier = isIdentifierPattern(pattern);
+        cr.char_class = null;
+        cr.char_class_mode = .first_char;
+        cr.literal_set = null;
+        if (cr.simple_prefix == null and !cr.is_identifier) {
+            if (detectCharClass(pattern)) |cc| {
+                cr.char_class = cc.bitmap;
+                cr.char_class_mode = cc.mode;
+            } else if (detectLiteralSet(alloc, pattern)) |lset| {
+                cr.literal_set = lset;
+            }
+        }
         const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
         cr.valid = comp_result == 0;
         regex_list.append(cr) catch {};
@@ -3127,11 +3147,23 @@ fn collectStaticCeiling(
                 const pattern = entry.key_ptr.*;
                 const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
-                cr.simple_prefix = detectSimplePrefix(pattern);
+                cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
+                cr.is_identifier = isIdentifierPattern(pattern);
+                cr.char_class = null;
+                cr.char_class_mode = .first_char;
+                cr.literal_set = null;
+                if (cr.simple_prefix == null and !cr.is_identifier) {
+                    if (detectCharClass(pattern)) |cc| {
+                        cr.char_class = cc.bitmap;
+                        cr.char_class_mode = cc.mode;
+                    } else if (detectLiteralSet(alloc, pattern)) |lset| {
+                        cr.literal_set = lset;
+                    }
+                }
                 const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
                 cr.valid = comp_result == 0;
                 regex_list.append(cr) catch {};
-                if (cr.valid or cr.simple_prefix != null) {
+                if (cr.valid or cr.simple_prefix != null or cr.is_identifier or cr.char_class != null or cr.literal_set != null) {
                     pattern_regexes.append(cr) catch {};
                 }
             }
