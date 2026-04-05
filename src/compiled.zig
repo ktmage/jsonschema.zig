@@ -1322,14 +1322,12 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
             .generic => return false,
             .pattern_properties_compiled => |pp| {
                 for (pp) |entry| {
-                    if (entry.regex.simple_prefix == null and !entry.regex.is_identifier) return false;
+                    if (entry.regex.simple_prefix == null and !entry.regex.is_identifier and entry.regex.char_class == null and entry.regex.literal_set == null) return false;
                 }
             },
             else => {},
         }
     }
-    // unevaluated_properties_compiled is handled by isValidatorValid
-    // (only for ceiling-based checks without regex allocation)
     return true;
 }
 
@@ -1337,7 +1335,8 @@ fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *c
     if (ls.node) |node| {
         if (node.always_valid) return true;
         if (node.simple_type != .none) return Validator.matchesSimpleType(instance, node.simple_type);
-        if (node.has_id) return null;
+        // Note: has_id check removed — isValidFast handles $id-bearing nodes
+        // correctly when called from compiled path (no registry needed)
         return node.isValidFast(instance, compiled);
     }
     return switch (ls.value) {
