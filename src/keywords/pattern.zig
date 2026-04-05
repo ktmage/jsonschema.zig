@@ -2,9 +2,9 @@ const std = @import("std");
 const validator = @import("../validator.zig");
 const Context = validator.Context;
 const c = @cImport(@cInclude("regex.h"));
+const compiled_mod = @import("../compiled.zig");
 
 pub fn validate(ctx: Context) void {
-    // Use pre-extracted value if available
     const value = ctx.current_keyword_value orelse ctx.schema.object.get("pattern") orelse return;
     const instance_str = switch (ctx.instance) {
         .string => |s| s,
@@ -15,8 +15,9 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    // Null-terminate both strings for C interop.
-    const pattern_z = ctx.allocator.dupeZ(u8, pattern_str) catch return;
+    // Convert ECMA-262 shortcuts (\d, \w, \s) for POSIX ERE
+    const posix_pat = compiled_mod.convertEcmaToPostfix(ctx.allocator, pattern_str) catch pattern_str;
+    const pattern_z = ctx.allocator.dupeZ(u8, posix_pat) catch return;
     defer ctx.allocator.free(pattern_z);
     const instance_z = ctx.allocator.dupeZ(u8, instance_str) catch return;
     defer ctx.allocator.free(instance_z);

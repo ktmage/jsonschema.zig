@@ -26,8 +26,9 @@ pub fn validate(ctx: Context) void {
         // Pre-lookup compiled node once per pattern's sub_schema
         const sub_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |comp| comp.getNode(sub_schema) else null;
 
-        // Null-terminate the pattern for POSIX regex
-        const pattern_z = ctx.allocator.dupeZ(u8, pattern) catch continue;
+        // Convert ECMA-262 shortcuts and null-terminate for POSIX regex
+        const posix_pat = compiled_mod.convertEcmaToPostfix(ctx.allocator, pattern) catch pattern;
+        const pattern_z = ctx.allocator.dupeZ(u8, posix_pat) catch continue;
 
         var regex: c.regex_t = undefined;
         const comp_result = c.regcomp(&regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
@@ -81,7 +82,8 @@ pub fn matchesAnyPattern(allocator: std.mem.Allocator, prop_name: []const u8, pa
     var it = pattern_props.iterator();
     while (it.next()) |entry| {
         const pattern = entry.key_ptr.*;
-        const pattern_z = allocator.dupeZ(u8, pattern) catch continue;
+        const posix_pat2 = compiled_mod.convertEcmaToPostfix(allocator, pattern) catch pattern;
+        const pattern_z = allocator.dupeZ(u8, posix_pat2) catch continue;
 
         var regex: c.regex_t = undefined;
         const comp_result = c.regcomp(&regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);

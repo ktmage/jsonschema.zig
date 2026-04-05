@@ -2791,6 +2791,50 @@ fn extractPropertyNames(alloc: Allocator, obj: std.json.ObjectMap) []const []con
 }
 
 /// Compile a POSIX regex pattern string. Returns null if not a string or compilation fails.
+/// Convert ECMA-262 regex shortcuts to POSIX ERE equivalents.
+/// \d → [0-9], \D → [^0-9], \w → [a-zA-Z0-9_], \W → [^a-zA-Z0-9_], \s → [ \t\n\r], \S → [^ \t\n\r]
+pub fn convertEcmaToPostfix(alloc: Allocator, pattern: []const u8) ![]const u8 {
+    // Quick check: does the pattern contain any shortcuts?
+    var has_shortcuts = false;
+    for (0..pattern.len -| 1) |i| {
+        if (pattern[i] == '\\') {
+            switch (pattern[i + 1]) {
+                'd', 'D', 'w', 'W', 's', 'S' => { has_shortcuts = true; break; },
+                else => {},
+            }
+        }
+    }
+    if (!has_shortcuts) return pattern;
+
+    var buf = std.ArrayList(u8).init(alloc);
+    var i: usize = 0;
+    while (i < pattern.len) {
+        if (pattern[i] == '\\' and i + 1 < pattern.len) {
+            const replacement: ?[]const u8 = switch (pattern[i + 1]) {
+                'd' => "[0-9]",
+                'D' => "[^0-9]",
+                'w' => "[a-zA-Z0-9_]",
+                'W' => "[^a-zA-Z0-9_]",
+                's' => "[ \\t\\n\\r]",
+                'S' => "[^ \\t\\n\\r]",
+                else => null,
+            };
+            if (replacement) |r| {
+                try buf.appendSlice(r);
+                i += 2;
+            } else {
+                try buf.append(pattern[i]);
+                try buf.append(pattern[i + 1]);
+                i += 2;
+            }
+        } else {
+            try buf.append(pattern[i]);
+            i += 1;
+        }
+    }
+    return buf.toOwnedSlice();
+}
+
 fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.ArrayList(*CompiledRegex)) ?*CompiledRegex {
     const pattern_str = switch (pattern_val) {
         .string => |s| s,
@@ -2815,7 +2859,9 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
             cr.ci_literal = ci;
         }
     }
-    const pattern_z = alloc.dupeZ(u8, pattern_str) catch return null;
+    // Convert ECMA-262 shortcuts (\d, \w, \s) to POSIX ERE equivalents
+    const posix_pattern = convertEcmaToPostfix(alloc, pattern_str) catch pattern_str;
+    const pattern_z = alloc.dupeZ(u8, posix_pattern) catch return null;
     const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
     cr.valid = comp_result == 0;
     cr.fast = FastRegex.compile(pattern_str, alloc);
@@ -3209,7 +3255,8 @@ fn compilePatternProperties(
     while (it.next()) |entry| {
         const pattern = entry.key_ptr.*;
         const sub_schema = entry.value_ptr.*;
-        const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
+        const posix_pat = convertEcmaToPostfix(alloc, pattern) catch pattern;
+        const pattern_z = alloc.dupeZ(u8, posix_pat) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
         cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
         cr.is_identifier = isIdentifierPattern(pattern);
@@ -3464,7 +3511,8 @@ fn collectStaticCeiling(
             var pp_it = pp.object.iterator();
             while (pp_it.next()) |entry| {
                 const pattern = entry.key_ptr.*;
-                const pattern_z = alloc.dupeZ(u8, pattern) catch continue;
+                const posix_pat2 = convertEcmaToPostfix(alloc, pattern) catch pattern;
+                const pattern_z = alloc.dupeZ(u8, posix_pat2) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
                 cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
                 cr.is_identifier = isIdentifierPattern(pattern);
