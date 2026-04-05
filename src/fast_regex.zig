@@ -216,34 +216,42 @@ pub const FastRegex = struct {
                 pos += 1;
                 count += 1;
             }
-            // Check if next op is a literal (optimize greedy+literal)
-            const has_next_lit = oi + 1 < ops.len and ops[oi + 1].is_literal;
-            if (has_next_lit and (op.max == 0 or op.max > op.min)) {
+            // Optimization: if next op is a literal, check if literal is IN the char class
+            if (oi + 1 < ops.len and ops[oi + 1].is_literal and (op.max == 0 or op.max > op.min)) {
                 const next_lit = ops[oi + 1].literal_char;
-                // Forward scan: track last position where next_lit occurs
-                var last_lit_pos: ?usize = null;
-                var scan_pos = pos;
-                if (op.max == 0) {
-                    while (scan_pos < input.len and op.matchChar(input[scan_pos])) {
-                        if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
-                        scan_pos += 1;
+                const lit_in_class = op.matchChar(next_lit);
+                if (!lit_in_class) {
+                    // Literal NOT in class: greedy naturally stops at literal (no backtrack needed)
+                    if (op.max == 0) {
+                        while (pos < input.len and op.matchChar(input[pos])) pos += 1;
+                    } else {
+                        while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
                     }
                 } else {
-                    while (count < op.max and scan_pos < input.len and op.matchChar(input[scan_pos])) {
-                        if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
-                        scan_pos += 1;
-                        count += 1;
+                    // Literal IN class: forward scan tracking last literal position
+                    var last_lit_pos: ?usize = null;
+                    var scan_pos = pos;
+                    if (op.max == 0) {
+                        while (scan_pos < input.len and op.matchChar(input[scan_pos])) {
+                            if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
+                            scan_pos += 1;
+                        }
+                    } else {
+                        while (count < op.max and scan_pos < input.len and op.matchChar(input[scan_pos])) {
+                            if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
+                            scan_pos += 1;
+                            count += 1;
+                        }
+                    }
+                    if (scan_pos < input.len and input[scan_pos] == next_lit) {
+                        pos = scan_pos;
+                    } else if (last_lit_pos) |lp| {
+                        pos = lp;
+                    } else {
+                        return null;
                     }
                 }
-                // If the char right after greedy range IS the literal, use it
-                if (scan_pos < input.len and input[scan_pos] == next_lit) {
-                    pos = scan_pos;
-                } else if (last_lit_pos) |lp| {
-                    pos = lp; // jump to last occurrence of literal in greedy range
-                } else {
-                    return null; // literal not found
-                }
-                oi += 1; // skip the greedy op, pos is at the literal
+                oi += 1;
                 continue;
             }
             // Standard greedy (no literal follows)
