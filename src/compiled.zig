@@ -180,7 +180,6 @@ pub const CompiledValidator = union(enum) {
     // String
     min_length: u64,
     max_length: u64,
-    pattern: std.json.Value,
 
     // Array
     min_items: u64,
@@ -239,20 +238,11 @@ pub const CompiledValidator = union(enum) {
     },
 
     // Pre-linked if/then/else
-    if_then_else_compiled: struct {
-        if_schema: LinkedSchema,
-        then_schema: ?LinkedSchema,
-        else_schema: ?LinkedSchema,
-    },
+    // Heap-allocated to keep union small (was 232 bytes inline)
+    if_then_else_compiled: *const IfThenElseCompiled,
 
-    // Compiled unevaluatedProperties with inline ceiling check
-    unevaluated_properties_compiled: struct {
-        schema_value: std.json.Value,
-        ceiling_map: ?*std.StringHashMap(void),
-        ceiling_arr: ?[]const []const u8,
-        pattern_regexes: ?[]*CompiledRegex,
-        all_covered: bool,
-    },
+    // Heap-allocated to keep union small (was 104 bytes inline)
+    unevaluated_properties_compiled: *const UnevalPropsCompiled,
 
     // Compiled dependentRequired: trigger property → required property names
     dependent_required_compiled: []const DependentRequiredEntry,
@@ -320,6 +310,20 @@ pub const CompiledRegex = struct {
         }
         return false;
     }
+};
+
+pub const IfThenElseCompiled = struct {
+    if_schema: LinkedSchema,
+    then_schema: ?LinkedSchema,
+    else_schema: ?LinkedSchema,
+};
+
+pub const UnevalPropsCompiled = struct {
+    schema_value: std.json.Value,
+    ceiling_map: ?*std.StringHashMap(void),
+    ceiling_arr: ?[]const []const u8,
+    pattern_regexes: ?[]*CompiledRegex,
+    all_covered: bool,
 };
 
 /// Pre-compiled pattern property: regex + pre-linked sub-schema.
@@ -535,7 +539,7 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             const len = std.unicode.utf8CountCodepoints(s) catch return true;
             return len <= limit;
         },
-        .pattern => return null, // needs regex, can't inline
+        // pattern variant removed (replaced by pattern_compiled)
         .min_items => |limit| {
             const arr = switch (instance) {
                 .array => |a| a.items,
@@ -1395,13 +1399,16 @@ fn compileNode(
                     switch (v) {
                         .generic => |g| {
                             if (std.mem.eql(u8, g.keyword_name, "unevaluatedProperties")) {
-                                validators.items[vi] = .{ .unevaluated_properties_compiled = .{
-                                    .schema_value = g.keyword_value,
-                                    .ceiling_map = ceiling_map,
-                                    .ceiling_arr = unevaluated_ceiling,
-                                    .pattern_regexes = unevaluated_pattern_regexes,
-                                    .all_covered = unevaluated_all_covered,
-                                } };
+                                if (alloc.create(UnevalPropsCompiled)) |up| {
+                                    up.* = .{
+                                        .schema_value = g.keyword_value,
+                                        .ceiling_map = ceiling_map,
+                                        .ceiling_arr = unevaluated_ceiling,
+                                        .pattern_regexes = unevaluated_pattern_regexes,
+                                        .all_covered = unevaluated_all_covered,
+                                    };
+                                    validators.items[vi] = .{ .unevaluated_properties_compiled = up };
+                                } else |_| {}
                                 break;
                             }
                         },
@@ -1898,11 +1905,14 @@ fn compileKeywords(
     if (obj.get("if")) |kv| {
         const then_val = obj.get("then");
         const else_val = obj.get("else");
-        validators.append(.{ .if_then_else_compiled = .{
-            .if_schema = linkSchema(node_map, kv),
-            .then_schema = if (then_val) |tv| linkSchema(node_map, tv) else null,
-            .else_schema = if (else_val) |ev| linkSchema(node_map, ev) else null,
-        } }) catch {};
+        if (alloc.create(IfThenElseCompiled)) |ite| {
+            ite.* = .{
+                .if_schema = linkSchema(node_map, kv),
+                .then_schema = if (then_val) |tv| linkSchema(node_map, tv) else null,
+                .else_schema = if (else_val) |ev| linkSchema(node_map, ev) else null,
+            };
+            validators.append(.{ .if_then_else_compiled = ite }) catch {};
+        } else |_| {}
     }
 
     // Unevaluated (must be last — depends on other keywords' evaluations)

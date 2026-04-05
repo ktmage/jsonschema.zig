@@ -588,10 +588,6 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("maxLength", msg);
                         }
                     },
-                    .pattern => {
-                        // Should not happen (compiled as generic), but handle gracefully
-                        continue;
-                    },
                     .min_items => |limit| {
                         const arr = switch (ctx.instance) {
                             .array => |a| a,
