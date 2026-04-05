@@ -63,17 +63,14 @@ pub fn isValidCompiled(
         if (n.isValidFast(instance, compiled)) |result| return result;
     }
 
-    // Fallback: bool_only validateCompiled (skips error message construction)
-    var errors = std.ArrayList(ValidationError).init(allocator);
-    // Pre-allocate 1 slot so bool_only sentinel can set items.len = 1
-    errors.ensureTotalCapacity(1) catch {};
-
-    // Dynamic scope for $dynamicRef resolution (Draft 2020-12)
-    var dynamic_scope = std.ArrayList(Validator.DynamicScopeEntry).init(allocator);
-    defer dynamic_scope.deinit();
-    // Push root schema to dynamic scope (needed for $dynamicRef/$dynamicAnchor)
-    const root_id = if (schema.object.get("$id")) |id_val| switch (id_val) { .string => |s| s, else => "" } else "";
-    dynamic_scope.append(.{ .base_uri = root_id, .schema = schema }) catch {};
+    // Fallback: bool_only validateCompiled — zero-allocation path
+    // Stack-based errors (sentinel trick sets items.len = 1 without writing data)
+    var error_buf: [1]ValidationError = undefined;
+    var errors = std.ArrayList(ValidationError){
+        .items = error_buf[0..0], // len=0, but ptr is valid stack memory
+        .capacity = 1,
+        .allocator = allocator,
+    };
 
     const ctx = Validator.Context{
         .allocator = allocator,
@@ -86,7 +83,7 @@ pub fn isValidCompiled(
         .registry = null,
         .base_uri = "",
         .ref_base_uri = "",
-        .dynamic_scope = &dynamic_scope,
+        .dynamic_scope = null,
         .compiled = compiled,
         .compiled_node = compiled.getNode(schema),
         .bool_only = true,
