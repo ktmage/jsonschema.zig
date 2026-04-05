@@ -195,7 +195,7 @@ pub const Context = struct {
                     const node = compiled.getNode(sub_schema);
                     if (node) |n| {
                         if (!n.has_id or self.registry == null) {
-                            if (n.isValid(instance, compiled)) |result| return result;
+                            if (n.isValidFast(instance, compiled)) |result| return result;
                             // isValid returned null (.generic) — need Context fallback
                             if (self.registry == null) {
                                 var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
@@ -250,7 +250,7 @@ pub const Context = struct {
                     const node = pre_node orelse compiled.getNode(sub_schema);
                     if (node) |n| {
                         if (!n.has_id or self.registry == null) {
-                            if (n.isValid(instance, compiled)) |result| return result;
+                            if (n.isValidFast(instance, compiled)) |result| return result;
                             if (self.registry == null) {
                                 var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
                                 const child = Context{

@@ -425,27 +425,6 @@ pub const CompiledNode = struct {
 
     /// Extended boolean validation. Returns null only for .generic validators.
     /// Handles more cases than isValidFast (ref_overrides, pattern without alloc).
-    pub fn isValid(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-        if (self.always_valid) return true;
-        if (self.simple_type != .none) return Validator.matchesSimpleType(instance, self.simple_type);
-        if (self.ref_overrides) {
-            for (self.validators) |v| {
-                switch (v) {
-                    .ref_local => |ls| {
-                        if (ls.node) |rn| return rn.isValid(instance, compiled);
-                    },
-                    else => {},
-                }
-            }
-            return null;
-        }
-        for (self.validators) |v| {
-            const result = isValidatorValid(v, instance, compiled) orelse return null;
-            if (!result) return false;
-        }
-        return true;
-    }
-
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
     pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
         if (self.always_valid) return true;
