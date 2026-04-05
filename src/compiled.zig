@@ -286,15 +286,18 @@ pub const CompiledRegex = struct {
     regex: c.regex_t,
     valid: bool,
     /// Simple prefix string for fast matching (e.g., "^x-" → prefix = "x-")
-    /// When non-null, use prefix match instead of regex for speed.
     simple_prefix: ?[]const u8 = null,
+    /// True if this is a ^[_a-zA-Z][a-zA-Z0-9_-]*$ identifier pattern
+    is_identifier: bool = false,
 
     /// Check if a string matches this compiled pattern.
     pub fn matches(self: *const CompiledRegex, str: []const u8, allocator: ?std.mem.Allocator) bool {
-        // Fast path: simple prefix match (no regex, no allocation)
+        // Fast path: simple prefix match
         if (self.simple_prefix) |prefix| {
             return str.len >= prefix.len and std.mem.eql(u8, str[0..prefix.len], prefix);
         }
+        // Fast path: identifier pattern
+        if (self.is_identifier) return matchesIdentifierPattern(str);
         // Regex path: need null-terminated string
         if (!self.valid) return false;
         const alloc = allocator orelse return false;
@@ -690,14 +693,18 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                     if (!found) {
                         var pattern_match = false;
                         for (patterns) |cr| {
-                            // Only use simple_prefix in isValidFast (no allocator)
                             if (cr.simple_prefix) |prefix| {
                                 if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
                                     pattern_match = true;
                                     break;
                                 }
+                            } else if (cr.is_identifier) {
+                                if (matchesIdentifierPattern(key)) {
+                                    pattern_match = true;
+                                    break;
+                                }
                             } else {
-                                return null; // Can't check regex without allocator
+                                return null; // Can't check complex regex without allocator
                             }
                         }
                         if (!pattern_match) return false;
@@ -867,16 +874,21 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 .object => |o| o,
                 else => return true,
             };
-            // Only handle if all patterns use simple_prefix (no regex allocation needed)
+            // Only handle if all patterns can be matched without allocation
             for (pp_entries) |pp_entry| {
-                if (pp_entry.regex.simple_prefix == null) return null;
+                if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier) return null;
             }
             const keys = obj.keys();
             const vals = obj.values();
             for (keys, vals) |key, val| {
                 for (pp_entries) |pp_entry| {
-                    const prefix = pp_entry.regex.simple_prefix.?;
-                    if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
+                    const matched = if (pp_entry.regex.simple_prefix) |prefix|
+                        key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)
+                    else if (pp_entry.regex.is_identifier)
+                        matchesIdentifierPattern(key)
+                    else
+                        false;
+                    if (matched) {
                         const result = validateLinkedSchema(pp_entry.schema, val, compiled) orelse return null;
                         if (!result) return false;
                     }
@@ -1093,9 +1105,8 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
         switch (v) {
             .generic => return false,
             .pattern_properties_compiled => |pp| {
-                // Only inlinable if all patterns use simple prefix
                 for (pp) |entry| {
-                    if (entry.regex.simple_prefix == null) return false;
+                    if (entry.regex.simple_prefix == null and !entry.regex.is_identifier) return false;
                 }
             },
             else => {},
@@ -1938,6 +1949,7 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     };
     const cr = alloc.create(CompiledRegex) catch return null;
     cr.simple_prefix = detectSimplePrefix(pattern_str);
+    cr.is_identifier = isIdentifierPattern(pattern_str);
     const pattern_z = alloc.dupeZ(u8, pattern_str) catch return null;
     const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
     cr.valid = comp_result == 0;
@@ -1958,6 +1970,26 @@ fn detectSimplePrefix(pattern: []const u8) ?[]const u8 {
         }
     }
     return rest;
+}
+
+/// Check if a string matches the identifier pattern ^[_a-zA-Z][a-zA-Z0-9_-]*$
+/// Very common in JSON Schema (property name patterns).
+fn isIdentifierPattern(pattern: []const u8) bool {
+    return std.mem.eql(u8, pattern, "^[_a-zA-Z][a-zA-Z0-9_-]*$") or
+        std.mem.eql(u8, pattern, "^[a-zA-Z_][a-zA-Z0-9_-]*$") or
+        std.mem.eql(u8, pattern, "^[a-zA-Z][a-zA-Z0-9_-]*$");
+}
+
+fn matchesIdentifierPattern(s: []const u8) bool {
+    if (s.len == 0) return false;
+    // First char: [_a-zA-Z]
+    const first = s[0];
+    if (!((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_')) return false;
+    // Rest: [a-zA-Z0-9_-]*
+    for (s[1..]) |ch| {
+        if (!((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-')) return false;
+    }
+    return true;
 }
 
 /// Compile patternProperties into pre-compiled regex + linked schemas.
