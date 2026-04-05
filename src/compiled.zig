@@ -1232,9 +1232,6 @@ fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *c
     if (ls.node) |node| {
         if (node.always_valid) return true;
         if (node.has_id) return null;
-        // For ref_overrides nodes, use isValid (follows ref_local chain without Context)
-        // For all others, use isValidFast (lighter, no extra overhead)
-        if (node.ref_overrides) return node.isValid(instance, compiled);
         return node.isValidFast(instance, compiled);
     }
     return switch (ls.value) {
