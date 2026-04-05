@@ -196,13 +196,7 @@ pub const CompiledValidator = union(enum) {
     // so keyword functions fall back to ctx.schema.object.get(keyword_name).
     properties_compiled: []const PropertyEntry,
     all_of_compiled: []const LinkedSchema,
-    one_of_compiled: struct {
-        schemas: []const LinkedSchema,
-        /// Discriminator field name (e.g., "type") if all branches use properties.<field>.enum.
-        discriminator_field: ?[]const u8 = null,
-        /// Mapping from discriminator enum values to pre-linked branches.
-        discriminator_map: ?[]const DiscriminatorEntry = null,
-    },
+    one_of_compiled: *const OneOfCompiled,
     any_of_compiled: []const LinkedSchema,
     not_compiled: *const LinkedSchema,
     items_compiled: *const ItemsCompiled,
@@ -210,14 +204,7 @@ pub const CompiledValidator = union(enum) {
     // Combined object validator: type + required + properties + additionalProperties: false
     // Handles the common pattern in a single pass over instance keys/values,
     // avoiding per-property hashmap lookups. Uses bitmask for required tracking.
-    object_fast: struct {
-        properties: []const PropertyEntry,
-        required_mask: u64,
-        additional_false: bool,
-        has_type_object: bool,
-        /// Pre-built hashmap for O(1) property lookup (populated for schemas with >8 properties)
-        property_map: ?*std.StringHashMap(u32) = null,
-    },
+    object_fast: *const ObjectFastCompiled,
 
     // Pre-linked local $ref (fragment-only, no registry needed)
     ref_local: *const LinkedSchema,
@@ -316,6 +303,21 @@ pub const ContainsCompiled = struct {
     schema: LinkedSchema,
     min_contains: usize,
     max_contains: ?usize,
+};
+
+pub const OneOfCompiled = struct {
+    schemas: []const LinkedSchema,
+    discriminator_field: ?[]const u8 = null,
+    discriminator_map: ?[]const DiscriminatorEntry = null,
+    discriminator_is_exists: bool = false,
+};
+
+pub const ObjectFastCompiled = struct {
+    properties: []const PropertyEntry,
+    required_mask: u64,
+    additional_false: bool,
+    has_type_object: bool,
+    property_map: ?*std.StringHashMap(u32) = null,
 };
 
 pub const IfThenElseCompiled = struct {
@@ -1865,11 +1867,10 @@ fn compileKeywords(
                 const linked = linkSchemaArray(alloc, node_map, arr.items);
                 // Try to detect discriminator pattern
                 const disc = detectDiscriminator(alloc, arr.items, linked);
-                validators.append(.{ .one_of_compiled = .{
-                    .schemas = linked,
-                    .discriminator_field = disc.field,
-                    .discriminator_map = disc.map,
-                } }) catch {};
+                if (alloc.create(OneOfCompiled)) |oo| {
+                    oo.* = .{ .schemas = linked, .discriminator_field = disc.field, .discriminator_map = disc.map };
+                    validators.append(.{ .one_of_compiled = oo }) catch {};
+                } else |_| {}
             },
             else => {},
         }
@@ -2189,14 +2190,16 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
         } else |_| {}
     }
 
-    // Build the merged validator
-    const merged = CompiledValidator{ .object_fast = .{
+    // Build the merged validator (heap-allocated)
+    const of_val = alloc.create(ObjectFastCompiled) catch return;
+    of_val.* = .{
         .properties = props,
         .required_mask = required_mask,
         .additional_false = additional_false,
         .has_type_object = has_type_object,
         .property_map = property_map,
-    } };
+    };
+    const merged = CompiledValidator{ .object_fast = of_val };
 
     // Remove the merged validators (in reverse order to preserve indices)
     var indices_to_remove = std.ArrayList(usize).init(alloc);
