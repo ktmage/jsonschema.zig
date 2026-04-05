@@ -678,14 +678,15 @@ pub fn validateAll(ctx: Context) void {
                                 const can_skip = !snode.needs_uri_resolution or
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip) {
-                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                    // Try isValid (handles ref_overrides, more cases than isValidFast)
+                                    if (snode.isValid(ctx.instance, compiled)) |result| {
                                         if (result) continue;
                                         any_failed = true;
                                         break;
                                     }
                                 }
                             }
-                            // This branch can't be inlined — use boolean check
+                            // isValid returned null — need Context
                             if (!ctx.isSubschemaValidWithNode(s.value, ctx.instance, s.node)) {
                                 any_failed = true;
                                 break;
