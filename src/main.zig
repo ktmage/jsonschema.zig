@@ -58,9 +58,9 @@ pub fn isValidCompiled(
     const node = compiled.getNode(schema);
     if (node) |n| {
         if (n.always_valid) return true;
-        if (!n.has_id) {
-            if (n.isValidFast(instance, compiled)) |result| return result;
-        }
+        // No registry in isValidCompiled, so $id doesn't affect resolution.
+        // Safe to use isValidFast even with has_id.
+        if (n.isValidFast(instance, compiled)) |result| return result;
     }
 
     // Fallback: bool_only validateCompiled (skips error message construction)
