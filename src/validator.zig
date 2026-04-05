@@ -1488,7 +1488,10 @@ pub fn validateAll(ctx: Context) void {
                                 }
                             }
                             if (ctx.isSubschemaValidWithNode(dep.schema.value, ctx.instance, dep.schema.node)) continue;
-                            // Invalid — collect errors
+                            if (ctx.bool_only) {
+                                ctx.addError("dependentSchemas", "");
+                                return;
+                            }
                             const base_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "dependentSchemas");
                             const dep_path = @import("json_pointer.zig").appendProperty(ctx.allocator, base_path, dep.trigger);
                             const result = ctx.validateSubschema(dep.schema.value, ctx.instance, ctx.instance_path, dep_path);
@@ -1604,7 +1607,10 @@ pub fn validateAll(ctx: Context) void {
                                         }
                                     }
                                     if (ctx.isSubschemaValidWithNode(pp_entry.schema.value, prop_value, pp_entry.schema.node)) continue;
-                                    // Invalid — build error
+                                    if (ctx.bool_only) {
+                                        ctx.addError("patternProperties", "");
+                                        return;
+                                    }
                                     const base_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.schema_path, "patternProperties");
                                     const pp_path = @import("json_pointer.zig").appendProperty(ctx.allocator, base_path, pp_entry.pattern);
                                     const prop_path = @import("json_pointer.zig").appendProperty(ctx.allocator, ctx.instance_path, prop_name);
