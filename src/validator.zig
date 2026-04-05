@@ -514,8 +514,9 @@ pub fn validateAll(ctx: Context) void {
                 // Only when no registry — registry presence means $id scopes
                 // may affect nested $ref resolution.
                 if (n.validators.len == 1 and ctx.registry == null) {
-                    switch (n.validators[0]) {
-                        .ref_local => |ls| {
+                    if (n.validators[0].tag == .ref_local) {
+                        const ls: *const compiled_mod.LinkedSchema = n.validators[0].getData(*const compiled_mod.LinkedSchema);
+                        blk: {
                             const rnode_opt = ls.node orelse compiled.getNode(ls.value);
                             if (rnode_opt) |rnode| {
                                 const can_skip = !rnode.needs_uri_resolution and !rnode.has_id;
@@ -550,8 +551,8 @@ pub fn validateAll(ctx: Context) void {
                                     return;
                                 }
                             }
-                        },
-                        else => {},
+                            break :blk;
+                        }
                     }
                 }
                 @import("keywords/ref.zig").validate(ctx);
@@ -567,15 +568,17 @@ pub fn validateAll(ctx: Context) void {
             for (n.validators) |v| {
                 // bool_only early exit: stop on first error
                 if (ctx.bool_only and ctx.errors.items.len > 0) return;
-                switch (v) {
-                    .type_single => |st| {
+                switch (v.tag) {
+                    .type_single => {
+                        const st = v.getData(compiled_mod.SimpleType);
                         if (!matchesSimpleType(ctx.instance, st)) {
                             ctx.addError("type", "Instance does not match the expected type");
                         }
                     },
-                    .type_multi => |types| {
+                    .type_multi => {
+                        const types_w: *const compiled_mod.CompiledValidator.SimpleTypeSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.SimpleTypeSliceWrapper);
                         var matched = false;
-                        for (types) |st| {
+                        for (types_w.items) |st| {
                             if (matchesSimpleType(ctx.instance, st)) {
                                 matched = true;
                                 break;
@@ -585,9 +588,10 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("type", "Instance does not match any of the expected types");
                         }
                     },
-                    .enum_check => |enum_items| {
+                    .enum_check => {
+                        const enum_w: *const compiled_mod.CompiledValidator.SliceWrapper = v.getData(*const compiled_mod.CompiledValidator.SliceWrapper);
                         var found = false;
-                        for (enum_items) |candidate| {
+                        for (enum_w.items) |candidate| {
                             if (@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, candidate)) {
                                 found = true;
                                 break;
@@ -597,7 +601,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("enum", "Instance does not match any enum value");
                         }
                     },
-                    .enum_string_set => |set| {
+                    .enum_string_set => {
+                        const set: *const std.StringHashMap(void) = v.getData(*const std.StringHashMap(void));
                         const str = switch (ctx.instance) {
                             .string => |s| s,
                             else => {
@@ -609,12 +614,14 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("enum", "Instance does not match any enum value");
                         }
                     },
-                    .const_check => |const_val_ptr| {
+                    .const_check => {
+                        const const_val_ptr: *const std.json.Value = v.getData(*const std.json.Value);
                         if (!@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, const_val_ptr.*)) {
                             ctx.addError("const", "Instance does not match the const value");
                         }
                     },
-                    .minimum => |limit| {
+                    .minimum => {
+                        const limit = v.getData(f64);
                         const instance_num: f64 = switch (ctx.instance) {
                             .integer => |n2| @floatFromInt(n2),
                             .float => |f| f,
@@ -624,7 +631,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("minimum", "Value must be greater than or equal to minimum");
                         }
                     },
-                    .maximum => |limit| {
+                    .maximum => {
+                        const limit = v.getData(f64);
                         const instance_num: f64 = switch (ctx.instance) {
                             .integer => |n2| @floatFromInt(n2),
                             .float => |f| f,
@@ -634,7 +642,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("maximum", "Value must be less than or equal to maximum");
                         }
                     },
-                    .exclusive_minimum => |limit| {
+                    .exclusive_minimum => {
+                        const limit = v.getData(f64);
                         const instance_num: f64 = switch (ctx.instance) {
                             .integer => |n2| @floatFromInt(n2),
                             .float => |f| f,
@@ -644,7 +653,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("exclusiveMinimum", "Value must be strictly greater than exclusiveMinimum");
                         }
                     },
-                    .exclusive_maximum => |limit| {
+                    .exclusive_maximum => {
+                        const limit = v.getData(f64);
                         const instance_num: f64 = switch (ctx.instance) {
                             .integer => |n2| @floatFromInt(n2),
                             .float => |f| f,
@@ -654,7 +664,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("exclusiveMaximum", "Value must be strictly less than exclusiveMaximum");
                         }
                     },
-                    .multiple_of => |divisor| {
+                    .multiple_of => {
+                        const divisor = v.getData(f64);
                         const instance_num: f64 = switch (ctx.instance) {
                             .integer => |n2| @floatFromInt(n2),
                             .float => |f| f,
@@ -668,7 +679,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .min_length => |limit| {
+                    .min_length => {
+                        const limit = v.getData(u64);
                         const instance_str = switch (ctx.instance) {
                             .string => |s| s,
                             else => continue,
@@ -684,7 +696,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("minLength", msg);
                         }
                     },
-                    .max_length => |limit| {
+                    .max_length => {
+                        const limit = v.getData(u64);
                         const instance_str = switch (ctx.instance) {
                             .string => |s| s,
                             else => continue,
@@ -700,7 +713,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("maxLength", msg);
                         }
                     },
-                    .min_items => |limit| {
+                    .min_items => {
+                        const limit = v.getData(u64);
                         const arr = switch (ctx.instance) {
                             .array => |a| a,
                             else => continue,
@@ -709,7 +723,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("minItems", "Array has fewer items than minItems");
                         }
                     },
-                    .max_items => |limit| {
+                    .max_items => {
+                        const limit = v.getData(u64);
                         const arr = switch (ctx.instance) {
                             .array => |a| a,
                             else => continue,
@@ -722,7 +737,9 @@ pub fn validateAll(ctx: Context) void {
                         // Handled by isValidFast; validateAll only reached for errors
                         @import("keywords/unique_items.zig").validate(ctx);
                     },
-                    .required => |names| {
+                    .required => {
+                        const names_w: *const compiled_mod.CompiledValidator.StringSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.StringSliceWrapper);
+                        const names = names_w.items;
                         const obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -738,7 +755,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .min_properties => |limit| {
+                    .min_properties => {
+                        const limit = v.getData(u64);
                         const obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -747,7 +765,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("minProperties", "Object has too few properties");
                         }
                     },
-                    .max_properties => |limit| {
+                    .max_properties => {
+                        const limit = v.getData(u64);
                         const obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -756,7 +775,9 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("maxProperties", "Object has too many properties");
                         }
                     },
-                    .properties_compiled => |entries| {
+                    .properties_compiled => {
+                        const entries_w: *const compiled_mod.CompiledValidator.PropertyEntrySliceWrapper = v.getData(*const compiled_mod.CompiledValidator.PropertyEntrySliceWrapper);
+                        const entries = entries_w.items;
                         // Inline fast path: use pre-linked nodes directly
                         const inst_obj = switch (ctx.instance) {
                             .object => |o| o,
@@ -790,7 +811,9 @@ pub fn validateAll(ctx: Context) void {
                             @import("keywords/properties.zig").validate(child);
                         }
                     },
-                    .all_of_compiled => |schemas| {
+                    .all_of_compiled => {
+                        const schemas_w: *const compiled_mod.CompiledValidator.LinkedSchemaSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.LinkedSchemaSliceWrapper);
+                        const schemas = schemas_w.items;
                         // Per-branch fast path: try isValidFast, fallback per branch
                         var any_failed = false;
                         for (schemas) |s| {
@@ -820,7 +843,8 @@ pub fn validateAll(ctx: Context) void {
                             @import("keywords/all_of.zig").validate(child);
                         }
                     },
-                    .one_of_compiled => |oo| {
+                    .one_of_compiled => {
+                        const oo: *const compiled_mod.OneOfCompiled = v.getData(*const compiled_mod.OneOfCompiled);
                         // Discriminator fast path: direct branch lookup
                         if (oo.discriminator_field) |field| {
                             if (oo.discriminator_map) |dmap| {
@@ -910,7 +934,9 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .any_of_compiled => |schemas| {
+                    .any_of_compiled => {
+                        const schemas_w: *const compiled_mod.CompiledValidator.LinkedSchemaSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.LinkedSchemaSliceWrapper);
+                        const schemas = schemas_w.items;
                         // Per-branch fast path
                         const inst_mask = compiled_mod.typeMaskForValue(ctx.instance);
                         var found = false;
@@ -936,7 +962,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("anyOf", "Instance does not match any schema in anyOf");
                         }
                     },
-                    .not_compiled => |ls| {
+                    .not_compiled => {
+                        const ls: *const compiled_mod.LinkedSchema = v.getData(*const compiled_mod.LinkedSchema);
                         if (ls.node) |snode| {
                             if (!snode.needs_uri_resolution) {
                                 if (snode.isValidFast(ctx.instance, compiled)) |result| {
@@ -952,7 +979,8 @@ pub fn validateAll(ctx: Context) void {
                         child.compiled_node = null;
                         @import("keywords/not_keyword.zig").validate(child);
                     },
-                    .items_compiled => |ic| {
+                    .items_compiled => {
+                        const ic: *const compiled_mod.ItemsCompiled = v.getData(*const compiled_mod.ItemsCompiled);
                         // Inline fast path: use pre-linked items schema node
                         const arr = switch (ctx.instance) {
                             .array => |a| a,
@@ -990,7 +1018,8 @@ pub fn validateAll(ctx: Context) void {
                             @import("keywords/items.zig").validate(ctx);
                         }
                     },
-                    .object_fast => |of| {
+                    .object_fast => {
+                        const of: *const compiled_mod.ObjectFastCompiled = v.getData(*const compiled_mod.ObjectFastCompiled);
                         // Combined type + required + properties + additionalProperties in one pass
                         const inst_obj = switch (ctx.instance) {
                             .object => |o| o,
@@ -1143,7 +1172,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .ref_local => |ls| {
+                    .ref_local => {
+                        const ls: *const compiled_mod.LinkedSchema = v.getData(*const compiled_mod.LinkedSchema);
                         // Inline local $ref: directly validate against pre-linked target
                         const rnode_opt = ls.node orelse if (ctx.compiled) |cc| cc.getNode(ls.value) else null;
                         if (rnode_opt) |rnode| {
@@ -1188,7 +1218,8 @@ pub fn validateAll(ctx: Context) void {
                         child.compiled_node = null;
                         @import("keywords/ref.zig").validate(child);
                     },
-                    .additional_properties_false => |ap| {
+                    .additional_properties_false => {
+                        const ap: *const compiled_mod.CompiledValidator.AdditionalPropertiesFalseData = v.getData(*const compiled_mod.CompiledValidator.AdditionalPropertiesFalseData);
                         const inst_obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -1229,7 +1260,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .additional_properties_schema => |ap| {
+                    .additional_properties_schema => {
+                        const ap: *const compiled_mod.AdditionalPropsSchemaCompiled = v.getData(*const compiled_mod.AdditionalPropsSchemaCompiled);
                         const inst_obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -1263,7 +1295,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .if_then_else_compiled => |ite| {
+                    .if_then_else_compiled => {
+                        const ite: *const compiled_mod.IfThenElseCompiled = v.getData(*const compiled_mod.IfThenElseCompiled);
                         // Inline fast path: use pre-linked schemas
                         const if_valid = blk: {
                             if (ite.if_schema.node) |inode| {
@@ -1309,7 +1342,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .pattern_compiled => |cr| {
+                    .pattern_compiled => {
+                        const cr: *const compiled_mod.CompiledRegex = v.getData(*const compiled_mod.CompiledRegex);
                         const instance_str = switch (ctx.instance) {
                             .string => |s| s,
                             else => continue,
@@ -1321,7 +1355,9 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("pattern", "String does not match pattern");
                         }
                     },
-                    .dependent_required_compiled => |deps| {
+                    .dependent_required_compiled => {
+                        const deps_w: *const compiled_mod.CompiledValidator.DependentRequiredSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.DependentRequiredSliceWrapper);
+                        const deps = deps_w.items;
                         const dr_obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -1337,7 +1373,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .contains_compiled => |cc| {
+                    .contains_compiled => {
+                        const cc: *const compiled_mod.ContainsCompiled = v.getData(*const compiled_mod.ContainsCompiled);
                         const c_arr = switch (ctx.instance) {
                             .array => |a| a,
                             else => continue,
@@ -1367,7 +1404,9 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .prefix_items_compiled => |schemas| {
+                    .prefix_items_compiled => {
+                        const pi_schemas_w: *const compiled_mod.CompiledValidator.LinkedSchemaSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.LinkedSchemaSliceWrapper);
+                        const schemas = pi_schemas_w.items;
                         const pi_arr = switch (ctx.instance) {
                             .array => |a| a,
                             else => continue,
@@ -1401,7 +1440,9 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .dependent_schemas_compiled => |deps| {
+                    .dependent_schemas_compiled => {
+                        const ds_deps_w: *const compiled_mod.CompiledValidator.DependentSchemaSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.DependentSchemaSliceWrapper);
+                        const deps = ds_deps_w.items;
                         const ds_obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -1436,7 +1477,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .property_names_compiled => |ls| {
+                    .property_names_compiled => {
+                        const ls: *const compiled_mod.LinkedSchema = v.getData(*const compiled_mod.LinkedSchema);
                         const pn_obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -1465,7 +1507,8 @@ pub fn validateAll(ctx: Context) void {
                         child.compiled_node = null;
                         @import("keywords/property_names.zig").validate(child);
                     },
-                    .unevaluated_properties_compiled => |up| {
+                    .unevaluated_properties_compiled => {
+                        const up: *const compiled_mod.UnevalPropsCompiled = v.getData(*const compiled_mod.UnevalPropsCompiled);
                         // Fast path: ceiling check inline
                         if (up.all_covered) continue;
                         const up_obj = switch (ctx.instance) {
@@ -1508,7 +1551,9 @@ pub fn validateAll(ctx: Context) void {
                         child.compiled_node = null;
                         @import("keywords/unevaluated_properties.zig").validate(child);
                     },
-                    .pattern_properties_compiled => |pp_entries| {
+                    .pattern_properties_compiled => {
+                        const pp_w: *const compiled_mod.CompiledValidator.PatternPropertySliceWrapper = v.getData(*const compiled_mod.CompiledValidator.PatternPropertySliceWrapper);
+                        const pp_entries = pp_w.items;
                         const inst_obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
@@ -1551,7 +1596,8 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                     },
-                    .generic => |g| {
+                    .generic => {
+                        const g: *const compiled_mod.GenericValidator = v.getData(*const compiled_mod.GenericValidator);
                         var child = ctx;
                         child.current_keyword_value = g.keyword_value;
                         // Clear compiled_node so nested validateAll calls don't

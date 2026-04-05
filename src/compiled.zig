@@ -158,95 +158,161 @@ pub const PropertyEntry = struct {
     schema: LinkedSchema,
 };
 
-/// Tagged union replacing function pointer + json value pairs.
-/// Each variant carries pre-extracted native data, eliminating runtime
-/// hash lookups and JSON-to-native conversions during validation.
-pub const CompiledValidator = union(enum) {
-    // Type checking
-    type_single: SimpleType,
-    type_multi: []const SimpleType,
-    enum_check: []const std.json.Value,
-    /// Pre-built string hashset for large string-only enums (O(1) lookup)
-    enum_string_set: *std.StringHashMap(void),
-    const_check: *const std.json.Value,
+/// Function pointer based validator for fast boolean-only dispatch.
+/// Each variant's validation logic is a standalone function called via isValid_fn,
+/// reducing per-dispatch overhead from ~5ns (switch) to ~3ns (indirect call).
+pub const CompiledValidator = struct {
+    isValid_fn: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool,
+    data: *allowzero const anyopaque,
+    tag: Tag,
 
-    // Numeric
-    minimum: f64,
-    maximum: f64,
-    exclusive_minimum: f64,
-    exclusive_maximum: f64,
-    multiple_of: f64,
+    pub const Tag = enum(u8) {
+        // Type checking
+        type_single,
+        type_multi,
+        enum_check,
+        enum_string_set,
+        const_check,
+        // Numeric
+        minimum,
+        maximum,
+        exclusive_minimum,
+        exclusive_maximum,
+        multiple_of,
+        // String
+        min_length,
+        max_length,
+        // Array
+        min_items,
+        max_items,
+        unique_items,
+        // Object
+        required,
+        min_properties,
+        max_properties,
+        // Pre-linked sub-schema variants
+        properties_compiled,
+        all_of_compiled,
+        one_of_compiled,
+        any_of_compiled,
+        not_compiled,
+        items_compiled,
+        // Combined object validator
+        object_fast,
+        // Pre-linked local $ref
+        ref_local,
+        // additionalProperties: false
+        additional_properties_false,
+        additional_properties_schema,
+        // Pre-linked if/then/else
+        if_then_else_compiled,
+        // Unevaluated properties
+        unevaluated_properties_compiled,
+        // dependentRequired / dependentSchemas
+        dependent_required_compiled,
+        dependent_schemas_compiled,
+        // propertyNames
+        property_names_compiled,
+        contains_compiled,
+        // prefixItems
+        prefix_items_compiled,
+        // Pattern
+        pattern_compiled,
+        pattern_properties_compiled,
+        // Generic fallback
+        generic,
+    };
 
-    // String
-    min_length: u64,
-    max_length: u64,
+    // --- Inline data helpers ---
 
-    // Array
-    min_items: u64,
-    max_items: u64,
-    unique_items: void,
+    pub fn inlineF64(val: f64) *allowzero const anyopaque {
+        return @ptrFromInt(@as(usize, @bitCast(val)));
+    }
 
-    // Object
-    required: []const []const u8,
-    min_properties: u64,
-    max_properties: u64,
+    pub fn extractF64(ptr: *allowzero const anyopaque) f64 {
+        return @bitCast(@intFromPtr(ptr));
+    }
 
-    // Pre-linked sub-schema variants (sub-schemas resolved at compile time).
-    // No keyword_value stored — validateAll sets current_keyword_value = null
-    // so keyword functions fall back to ctx.schema.object.get(keyword_name).
-    properties_compiled: []const PropertyEntry,
-    all_of_compiled: []const LinkedSchema,
-    one_of_compiled: *const OneOfCompiled,
-    any_of_compiled: []const LinkedSchema,
-    not_compiled: *const LinkedSchema,
-    items_compiled: *const ItemsCompiled,
+    pub fn inlineU64(val: u64) *allowzero const anyopaque {
+        return @ptrFromInt(val);
+    }
 
-    // Combined object validator: type + required + properties + additionalProperties: false
-    // Handles the common pattern in a single pass over instance keys/values,
-    // avoiding per-property hashmap lookups. Uses bitmask for required tracking.
-    object_fast: *const ObjectFastCompiled,
+    pub fn extractU64(ptr: *allowzero const anyopaque) u64 {
+        return @intFromPtr(ptr);
+    }
 
-    // Pre-linked local $ref (fragment-only, no registry needed)
-    ref_local: *const LinkedSchema,
+    pub fn inlineSimpleType(st: SimpleType) *allowzero const anyopaque {
+        return @ptrFromInt(@as(usize, @intFromEnum(st)));
+    }
 
-    // additionalProperties: false — pre-extracted allowed property names + optional pattern regexes
-    additional_properties_false: struct {
+    pub fn extractSimpleType(ptr: *allowzero const anyopaque) SimpleType {
+        return @enumFromInt(@as(u8, @intCast(@intFromPtr(ptr))));
+    }
+
+    // --- Data extraction helpers for validateAll (tag-based switch) ---
+
+    pub fn getData(self: *const CompiledValidator, comptime T: type) T {
+        if (T == f64) return extractF64(self.data);
+        if (T == u64) return extractU64(self.data);
+        if (T == SimpleType) return extractSimpleType(self.data);
+        if (T == void) return {};
+        // For pointer types, cast directly (strip allowzero for well-aligned heap pointers)
+        const non_zero: *const anyopaque = @ptrFromInt(@intFromPtr(self.data));
+        return @ptrCast(@alignCast(non_zero));
+    }
+
+    // --- Wrapper structs for slice data stored behind a pointer ---
+
+    pub const SliceWrapper = struct {
+        items: []const std.json.Value,
+    };
+
+    pub const SimpleTypeSliceWrapper = struct {
+        items: []const SimpleType,
+    };
+
+    pub const StringSliceWrapper = struct {
+        items: []const []const u8,
+    };
+
+    pub const PropertyEntrySliceWrapper = struct {
+        items: []const PropertyEntry,
+    };
+
+    pub const LinkedSchemaSliceWrapper = struct {
+        items: []const LinkedSchema,
+    };
+
+    pub const DependentRequiredSliceWrapper = struct {
+        items: []const DependentRequiredEntry,
+    };
+
+    pub const DependentSchemaSliceWrapper = struct {
+        items: []const DependentSchemaEntry,
+    };
+
+    pub const PatternPropertySliceWrapper = struct {
+        items: []const PatternPropertyEntry,
+    };
+
+    pub const AdditionalPropertiesFalseData = struct {
         property_names: []const []const u8,
-        pattern_regexes: ?[]const *CompiledRegex = null,
-    },
+        pattern_regexes: ?[]const *CompiledRegex,
+    };
 
-    additional_properties_schema: *const AdditionalPropsSchemaCompiled,
+    // --- Constructor helpers ---
 
-    // Pre-linked if/then/else
-    // Heap-allocated to keep union small (was 232 bytes inline)
-    if_then_else_compiled: *const IfThenElseCompiled,
+    pub fn initInlineF64(comptime tag_val: Tag, val: f64, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool) CompiledValidator {
+        return .{ .isValid_fn = isValid_fn_ptr, .data = inlineF64(val), .tag = tag_val };
+    }
 
-    // Heap-allocated to keep union small (was 104 bytes inline)
-    unevaluated_properties_compiled: *const UnevalPropsCompiled,
+    pub fn initInlineU64(comptime tag_val: Tag, val: u64, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool) CompiledValidator {
+        return .{ .isValid_fn = isValid_fn_ptr, .data = inlineU64(val), .tag = tag_val };
+    }
 
-    // Compiled dependentRequired: trigger property → required property names
-    dependent_required_compiled: []const DependentRequiredEntry,
-
-    // Compiled dependentSchemas: trigger property name → linked schema
-    dependent_schemas_compiled: []const DependentSchemaEntry,
-
-    // Compiled propertyNames: linked schema to validate property names against
-    property_names_compiled: *const LinkedSchema,
-
-    contains_compiled: *const ContainsCompiled,
-
-    // Compiled prefixItems with pre-linked schemas
-    prefix_items_compiled: []const LinkedSchema,
-
-    // Pre-compiled regex pattern (stores pointer to arena-allocated CompiledRegex)
-    pattern_compiled: *CompiledRegex,
-
-    // Pre-compiled pattern properties (regex + schema links)
-    pattern_properties_compiled: []const PatternPropertyEntry,
-
-    // Complex keywords — keep as generic with function pointer fallback
-    // These need full schema context (pattern matching, URI resolution, etc.)
-    generic: *const GenericValidator,
+    pub fn initPtr(comptime tag_val: Tag, ptr: anytype, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool) CompiledValidator {
+        return .{ .isValid_fn = isValid_fn_ptr, .data = @ptrFromInt(@intFromPtr(ptr)), .tag = tag_val };
+    }
 };
 
 pub const ItemsCompiled = struct {
@@ -502,628 +568,674 @@ pub const CompiledNode = struct {
 
 /// Check if a single compiled validator is valid for an instance.
 /// Returns null if the validator can't be inlined (caller must use full path).
+/// Now dispatches through the function pointer stored in CompiledValidator.
 pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    switch (v) {
-        .type_single => |st| {
-            return Validator.matchesSimpleType(instance, st);
-        },
-        .type_multi => |types| {
-            for (types) |st| {
-                if (Validator.matchesSimpleType(instance, st)) return true;
-            }
-            return false;
-        },
-        .enum_check => |enum_items| {
-            for (enum_items) |candidate| {
-                if (@import("keywords/enum_keyword.zig").jsonEqual(instance, candidate)) return true;
-            }
-            return false;
-        },
-        .enum_string_set => |set| {
-            const str = switch (instance) {
-                .string => |s| s,
-                else => return false,
-            };
-            return set.get(str) != null;
-        },
-        .const_check => |const_val| {
-            return @import("keywords/enum_keyword.zig").jsonEqual(instance, const_val.*);
-        },
-        .minimum => |limit| {
-            return numCmp(instance, limit, .gte);
-        },
-        .maximum => |limit| {
-            return numCmp(instance, limit, .lte);
-        },
-        .exclusive_minimum => |limit| {
-            return numCmp(instance, limit, .gt);
-        },
-        .exclusive_maximum => |limit| {
-            return numCmp(instance, limit, .lt);
-        },
-        .multiple_of => |divisor| {
-            const n = getNumber(instance) orelse return true;
-            if (divisor == 0) return true;
-            const remainder = @rem(n, divisor);
-            const tolerance: f64 = 1e-9;
-            return @abs(remainder) <= tolerance or @abs(remainder) - @abs(divisor) >= -tolerance;
-        },
-        .min_length => |limit| {
-            const s = switch (instance) {
-                .string => |str| str,
-                else => return true,
-            };
-            // Fast path: if byte count < limit, codepoints < limit (codepoints <= bytes)
-            if (s.len < limit) return false;
-            // If minLength is 1, byte length >= 1 is sufficient
-            if (limit <= 1) return true;
-            const len = std.unicode.utf8CountCodepoints(s) catch return true;
-            return len >= limit;
-        },
-        .max_length => |limit| {
-            const s = switch (instance) {
-                .string => |str| str,
-                else => return true,
-            };
-            // Fast path: if byte count fits in limit, codepoint count also fits (bytes >= codepoints)
-            if (s.len <= limit) return true;
-            const len = std.unicode.utf8CountCodepoints(s) catch return true;
-            return len <= limit;
-        },
-        // pattern variant removed (replaced by pattern_compiled)
-        .min_items => |limit| {
-            const arr = switch (instance) {
-                .array => |a| a.items,
-                else => return true,
-            };
-            return arr.len >= limit;
-        },
-        .max_items => |limit| {
-            const arr = switch (instance) {
-                .array => |a| a.items,
-                else => return true,
-            };
-            return arr.len <= limit;
-        },
-        .unique_items => {
-            const arr = switch (instance) {
-                .array => |a| a.items,
-                else => return true,
-            };
-            if (arr.len <= 1) return true;
-            // Fast path: all-strings arrays use hash-based O(n) check
-            if (arr.len <= 64) {
-                var all_strings = true;
-                for (arr) |item| {
-                    if (item != .string) { all_strings = false; break; }
-                }
-                if (all_strings) {
-                    // Bitmask-based: hash each string and check for collisions
-                    var seen: u64 = 0;
-                    for (arr) |item| {
-                        const s = item.string;
-                        var h: u64 = 0;
-                        for (s) |ch| h = h *% 31 +% ch;
-                        const bit = @as(u6, @intCast(h & 63));
-                        const mask = @as(u64, 1) << bit;
-                        if (seen & mask != 0) {
-                            // Collision — verify with full check for this pair
-                            for (0..arr.len - 1) |i| {
-                                if (arr[i] != .string) continue;
-                                for (i + 1..arr.len) |j| {
-                                    if (arr[j] != .string) continue;
-                                    if (arr[i].string.len == arr[j].string.len and
-                                        std.mem.eql(u8, arr[i].string, arr[j].string)) return false;
-                                }
-                            }
-                            return true;
+    return v.isValid_fn(v.data, instance, compiled);
+}
+
+// ---------------------------------------------------------------------------
+// Standalone isValid functions — one per CompiledValidator tag
+// ---------------------------------------------------------------------------
+
+fn isValid_type_single(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const st = CompiledValidator.extractSimpleType(data);
+    return Validator.matchesSimpleType(instance, st);
+}
+
+fn isValid_type_multi(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.SimpleTypeSliceWrapper = @ptrCast(@alignCast(data));
+    for (w.items) |st| {
+        if (Validator.matchesSimpleType(instance, st)) return true;
+    }
+    return false;
+}
+
+fn isValid_enum_check(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.SliceWrapper = @ptrCast(@alignCast(data));
+    for (w.items) |candidate| {
+        if (@import("keywords/enum_keyword.zig").jsonEqual(instance, candidate)) return true;
+    }
+    return false;
+}
+
+fn isValid_enum_string_set(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const set: *const std.StringHashMap(void) = @ptrCast(@alignCast(data));
+    const str = switch (instance) {
+        .string => |s| s,
+        else => return false,
+    };
+    return set.get(str) != null;
+}
+
+fn isValid_const_check(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const const_val: *const std.json.Value = @ptrCast(@alignCast(data));
+    return @import("keywords/enum_keyword.zig").jsonEqual(instance, const_val.*);
+}
+
+fn isValid_minimum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    return numCmp(instance, CompiledValidator.extractF64(data), .gte);
+}
+
+fn isValid_maximum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    return numCmp(instance, CompiledValidator.extractF64(data), .lte);
+}
+
+fn isValid_exclusive_minimum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    return numCmp(instance, CompiledValidator.extractF64(data), .gt);
+}
+
+fn isValid_exclusive_maximum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    return numCmp(instance, CompiledValidator.extractF64(data), .lt);
+}
+
+fn isValid_multiple_of(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const divisor = CompiledValidator.extractF64(data);
+    const n = getNumber(instance) orelse return true;
+    if (divisor == 0) return true;
+    const remainder = @rem(n, divisor);
+    const tolerance: f64 = 1e-9;
+    return @abs(remainder) <= tolerance or @abs(remainder) - @abs(divisor) >= -tolerance;
+}
+
+fn isValid_min_length(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const limit = CompiledValidator.extractU64(data);
+    const s = switch (instance) {
+        .string => |str| str,
+        else => return true,
+    };
+    if (s.len < limit) return false;
+    if (limit <= 1) return true;
+    const len = std.unicode.utf8CountCodepoints(s) catch return true;
+    return len >= limit;
+}
+
+fn isValid_max_length(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const limit = CompiledValidator.extractU64(data);
+    const s = switch (instance) {
+        .string => |str| str,
+        else => return true,
+    };
+    if (s.len <= limit) return true;
+    const len = std.unicode.utf8CountCodepoints(s) catch return true;
+    return len <= limit;
+}
+
+fn isValid_min_items(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const limit = CompiledValidator.extractU64(data);
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    return arr.len >= limit;
+}
+
+fn isValid_max_items(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const limit = CompiledValidator.extractU64(data);
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    return arr.len <= limit;
+}
+
+fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    if (arr.len <= 1) return true;
+    if (arr.len <= 64) {
+        var all_strings = true;
+        for (arr) |item| {
+            if (item != .string) { all_strings = false; break; }
+        }
+        if (all_strings) {
+            var seen: u64 = 0;
+            for (arr) |item| {
+                const s = item.string;
+                var h: u64 = 0;
+                for (s) |ch| h = h *% 31 +% ch;
+                const bit = @as(u6, @intCast(h & 63));
+                const mask = @as(u64, 1) << bit;
+                if (seen & mask != 0) {
+                    for (0..arr.len - 1) |i| {
+                        if (arr[i] != .string) continue;
+                        for (i + 1..arr.len) |j| {
+                            if (arr[j] != .string) continue;
+                            if (arr[i].string.len == arr[j].string.len and
+                                std.mem.eql(u8, arr[i].string, arr[j].string)) return false;
                         }
-                        seen |= mask;
                     }
                     return true;
                 }
-            }
-            // General O(n²) fallback
-            for (0..arr.len - 1) |i| {
-                for (i + 1..arr.len) |j| {
-                    if (@import("keywords/enum_keyword.zig").jsonEqual(arr[i], arr[j])) return false;
-                }
+                seen |= mask;
             }
             return true;
-        },
-        .required => |names| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            for (names) |name| {
-                if (obj.get(name) == null) return false;
-            }
-            return true;
-        },
-        .min_properties => |limit| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            return obj.count() >= limit;
-        },
-        .max_properties => |limit| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            return obj.count() <= limit;
-        },
-        .properties_compiled => |entries| {
-            const inst_obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            // Optimization: if instance has fewer properties than schema,
-            // iterate instance and linear-scan schema (avoids N hashmap lookups)
-            if (inst_obj.count() < entries.len and entries.len > 4) {
-                const keys = inst_obj.keys();
-                const vals = inst_obj.values();
-                for (keys, vals) |key, val| {
-                    for (entries) |entry| {
-                        if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
-                            if (entry.schema.node) |n| {
-                                if (n.always_valid) break;
-                                if (n.simple_type != .none) {
-                                    if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
-                                    break;
-                                }
-                            }
-                            const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
-                            if (!result) return false;
+        }
+    }
+    for (0..arr.len - 1) |i| {
+        for (i + 1..arr.len) |j| {
+            if (@import("keywords/enum_keyword.zig").jsonEqual(arr[i], arr[j])) return false;
+        }
+    }
+    return true;
+}
+
+fn isValid_required(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.StringSliceWrapper = @ptrCast(@alignCast(data));
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    for (w.items) |name| {
+        if (obj.get(name) == null) return false;
+    }
+    return true;
+}
+
+fn isValid_min_properties(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const limit = CompiledValidator.extractU64(data);
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    return obj.count() >= limit;
+}
+
+fn isValid_max_properties(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const limit = CompiledValidator.extractU64(data);
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    return obj.count() <= limit;
+}
+
+fn isValid_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.PropertyEntrySliceWrapper = @ptrCast(@alignCast(data));
+    const entries = w.items;
+    const inst_obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    if (inst_obj.count() < entries.len and entries.len > 4) {
+        const keys = inst_obj.keys();
+        const vals = inst_obj.values();
+        for (keys, vals) |key, val| {
+            for (entries) |entry| {
+                if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
+                    if (entry.schema.node) |n| {
+                        if (n.always_valid) break;
+                        if (n.simple_type != .none) {
+                            if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
                             break;
                         }
                     }
+                    const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                    if (!result) return false;
+                    break;
+                }
+            }
+        }
+        return true;
+    }
+    for (entries) |entry| {
+        const inst_val = inst_obj.get(entry.name) orelse continue;
+        const result = validateLinkedSchema(entry.schema, inst_val, compiled) orelse return null;
+        if (!result) return false;
+    }
+    return true;
+}
+
+fn isValid_all_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.LinkedSchemaSliceWrapper = @ptrCast(@alignCast(data));
+    for (w.items) |s| {
+        const result = validateLinkedSchema(s, instance, compiled) orelse return null;
+        if (!result) return false;
+    }
+    return true;
+}
+
+fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const oo: *const OneOfCompiled = @ptrCast(@alignCast(data));
+    if (oo.discriminator_field) |field| {
+        if (oo.discriminator_map) |dmap| {
+            const inst_obj = switch (instance) {
+                .object => |o| o,
+                else => return null,
+            };
+            if (oo.discriminator_is_exists) {
+                for (dmap) |entry| {
+                    if (inst_obj.get(entry.value) != null) {
+                        return validateLinkedSchema(entry.schema, instance, compiled);
+                    }
+                }
+                return null;
+            }
+            const disc_val = inst_obj.get(field) orelse return null;
+            const disc_str = switch (disc_val) {
+                .string => |s| s,
+                else => return null,
+            };
+            for (dmap) |entry| {
+                if (disc_str.len == entry.value.len and std.mem.eql(u8, disc_str, entry.value)) {
+                    return validateLinkedSchema(entry.schema, instance, compiled);
+                }
+            }
+            return false;
+        }
+    }
+    const inst_type_mask = typeMaskForValue(instance);
+    var compatible_count: usize = 0;
+    var last_compatible_idx: usize = 0;
+    for (oo.schemas, 0..) |s, idx| {
+        if (s.type_mask & inst_type_mask != 0) {
+            compatible_count += 1;
+            last_compatible_idx = idx;
+        }
+    }
+    if (compatible_count == 1) {
+        return validateLinkedSchema(oo.schemas[last_compatible_idx], instance, compiled);
+    }
+    var match_count: usize = 0;
+    for (oo.schemas) |s| {
+        if (s.type_mask & inst_type_mask == 0) continue;
+        const result = validateLinkedSchema(s, instance, compiled) orelse return null;
+        if (result) {
+            match_count += 1;
+            if (match_count > 1) return false;
+        }
+    }
+    return match_count == 1;
+}
+
+fn isValid_any_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.LinkedSchemaSliceWrapper = @ptrCast(@alignCast(data));
+    const inst_mask = typeMaskForValue(instance);
+    var any_null = false;
+    for (w.items) |s| {
+        if (s.type_mask & inst_mask == 0) continue;
+        if (validateLinkedSchema(s, instance, compiled)) |result| {
+            if (result) return true;
+        } else {
+            any_null = true;
+        }
+    }
+    if (any_null) return null;
+    return false;
+}
+
+fn isValid_not_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const ls: *const LinkedSchema = @ptrCast(@alignCast(data));
+    const result = validateLinkedSchema(ls.*, instance, compiled) orelse return null;
+    return !result;
+}
+
+fn isValid_items_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const ic: *const ItemsCompiled = @ptrCast(@alignCast(data));
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    if (arr.len <= ic.prefix_count) return true;
+    if (ic.schema.node) |inode| {
+        if (inode.simple_type != .none) {
+            for (arr[ic.prefix_count..]) |item| {
+                if (!Validator.matchesSimpleType(item, inode.simple_type)) return false;
+            }
+            return true;
+        }
+        if (!inode.needs_uri_resolution and !inode.ref_overrides) {
+            if (getNestedSimpleType(inode)) |info| {
+                for (arr[ic.prefix_count..]) |item| {
+                    if (!validateNestedArray(item, info.inner_type, info.min_items, info.depth)) return false;
                 }
                 return true;
             }
-            for (entries) |entry| {
-                const inst_val = inst_obj.get(entry.name) orelse continue;
-                const result = validateLinkedSchema(entry.schema, inst_val, compiled) orelse return null;
+        }
+    }
+    for (arr[ic.prefix_count..]) |item| {
+        const result = validateLinkedSchema(ic.schema, item, compiled) orelse return null;
+        if (!result) return false;
+    }
+    return true;
+}
+
+fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const of: *const ObjectFastCompiled = @ptrCast(@alignCast(data));
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return if (of.has_type_object) false else true,
+    };
+    const keys = obj.keys();
+    const vals = obj.values();
+    var found_mask: u64 = 0;
+    var additional_count: usize = 0;
+    if (of.property_map) |pmap| {
+        for (keys, vals) |key, val| {
+            if (pmap.get(key)) |pi| {
+                found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                const ls = of.properties[pi].schema;
+                if (ls.node) |n| {
+                    if (n.always_valid) continue;
+                    if (n.simple_type != .none) {
+                        if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
+                        continue;
+                    }
+                }
+                const result = validateLinkedSchema(ls, val, compiled) orelse return null;
                 if (!result) return false;
-            }
-            return true;
-        },
-        .all_of_compiled => |schemas| {
-            for (schemas) |s| {
-                const result = validateLinkedSchema(s, instance, compiled) orelse return null;
-                if (!result) return false;
-            }
-            return true;
-        },
-        .one_of_compiled => |oo| {
-            // Discriminator fast path (enum value or property existence)
-            if (oo.discriminator_field) |field| {
-                if (oo.discriminator_map) |dmap| {
-                    const inst_obj = switch (instance) {
-                        .object => |o| o,
-                        else => return null,
-                    };
-                    if (oo.discriminator_is_exists) {
-                        // Property-existence discriminator: check which branch's key exists
-                        for (dmap) |entry| {
-                            if (inst_obj.get(entry.value) != null) {
-                                return validateLinkedSchema(entry.schema, instance, compiled);
-                            }
-                        }
-                        return null; // no match
-                    }
-                    const disc_val = inst_obj.get(field) orelse return null;
-                    const disc_str = switch (disc_val) {
-                        .string => |s| s,
-                        else => return null,
-                    };
-                    for (dmap) |entry| {
-                        if (disc_str.len == entry.value.len and std.mem.eql(u8, disc_str, entry.value)) {
-                            return validateLinkedSchema(entry.schema, instance, compiled);
-                        }
-                    }
-                    return false;
-                }
-            }
-            // Type-based filtering: skip branches that can't match the instance type
-            const inst_type_mask = typeMaskForValue(instance);
-            // Fast path: count type-compatible branches first
-            var compatible_count: usize = 0;
-            var last_compatible_idx: usize = 0;
-            for (oo.schemas, 0..) |s, idx| {
-                if (s.type_mask & inst_type_mask != 0) {
-                    compatible_count += 1;
-                    last_compatible_idx = idx;
-                }
-            }
-            // If only one branch is type-compatible, it must be the match
-            if (compatible_count == 1) {
-                return validateLinkedSchema(oo.schemas[last_compatible_idx], instance, compiled);
-            }
-            var match_count: usize = 0;
-            for (oo.schemas) |s| {
-                if (s.type_mask & inst_type_mask == 0) continue;
-                const result = validateLinkedSchema(s, instance, compiled) orelse return null;
-                if (result) {
-                    match_count += 1;
-                    if (match_count > 1) return false;
-                }
-            }
-            return match_count == 1;
-        },
-        .any_of_compiled => |schemas| {
-            const inst_mask = typeMaskForValue(instance);
-            var any_null = false;
-            for (schemas) |s| {
-                if (s.type_mask & inst_mask == 0) continue;
-                if (validateLinkedSchema(s, instance, compiled)) |result| {
-                    if (result) return true;
-                } else {
-                    any_null = true;
-                }
-            }
-            if (any_null) return null;
-            return false;
-        },
-        .not_compiled => |ls| {
-            const result = validateLinkedSchema(ls.*, instance, compiled) orelse return null;
-            return !result;
-        },
-        .items_compiled => |ic| {
-            const arr = switch (instance) {
-                .array => |a| a.items,
-                else => return true,
-            };
-            if (arr.len <= ic.prefix_count) return true;
-            if (ic.schema.node) |inode| {
-                // Ultra-fast path for simple type items (e.g., {type: "number"})
-                if (inode.simple_type != .none) {
-                    for (arr[ic.prefix_count..]) |item| {
-                        if (!Validator.matchesSimpleType(item, inode.simple_type)) return false;
-                    }
-                    return true;
-                }
-                // Fast path for array-of-simple-type (e.g., coordinates: [[number]])
-                // Directly check nested arrays without going through full isValidFast
-                if (!inode.needs_uri_resolution and !inode.ref_overrides) {
-                    if (getNestedSimpleType(inode)) |info| {
-                        for (arr[ic.prefix_count..]) |item| {
-                            if (!validateNestedArray(item, info.inner_type, info.min_items, info.depth)) return false;
-                        }
-                        return true;
-                    }
-                }
-            }
-            for (arr[ic.prefix_count..]) |item| {
-                const result = validateLinkedSchema(ic.schema, item, compiled) orelse return null;
-                if (!result) return false;
-            }
-            return true;
-        },
-        .object_fast => |of| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return if (of.has_type_object) false else true,
-            };
-            const keys = obj.keys();
-            const vals = obj.values();
-            var found_mask: u64 = 0;
-            var additional_count: usize = 0;
-            if (of.property_map) |pmap| {
-                for (keys, vals) |key, val| {
-                    if (pmap.get(key)) |pi| {
-                        found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
-                        const ls = of.properties[pi].schema;
-                        // Ultra-fast: inline simple_type
-                        if (ls.node) |n| {
-                            if (n.always_valid) continue;
-                            if (n.simple_type != .none) {
-                                if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
-                                continue;
-                            }
-                        }
-                        const result = validateLinkedSchema(ls, val, compiled) orelse return null;
-                        if (!result) return false;
-                    } else {
-                        additional_count += 1;
-                    }
-                }
             } else {
-                // Linear scan for small schemas
-                for (keys, vals) |key, val| {
-                    var matched = false;
-                    for (of.properties, 0..) |entry, pi| {
-                        if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
-                            found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
-                            // Ultra-fast: inline simple_type
-                            if (entry.schema.node) |n| {
-                                if (n.always_valid) { matched = true; break; }
-                                if (n.simple_type != .none) {
-                                    if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
-                                    matched = true;
-                                    break;
-                                }
-                            }
-                            const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
-                            if (!result) return false;
+                additional_count += 1;
+            }
+        }
+    } else {
+        for (keys, vals) |key, val| {
+            var matched = false;
+            for (of.properties, 0..) |entry, pi| {
+                if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
+                    found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                    if (entry.schema.node) |n| {
+                        if (n.always_valid) { matched = true; break; }
+                        if (n.simple_type != .none) {
+                            if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
                             matched = true;
                             break;
                         }
                     }
-                    if (!matched) additional_count += 1;
+                    const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                    if (!result) return false;
+                    matched = true;
+                    break;
                 }
             }
-            // Check additionalProperties: false
-            if (of.additional_false and additional_count > 0) return false;
-            // Check required using bitmask
-            if (found_mask & of.required_mask != of.required_mask) return false;
-            return true;
-        },
-        .ref_local => |ls| {
-            return validateLinkedSchema(ls.*, instance, compiled);
-        },
-        .additional_properties_false => |ap| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            var covered: usize = 0;
+            if (!matched) additional_count += 1;
+        }
+    }
+    if (of.additional_false and additional_count > 0) return false;
+    if (found_mask & of.required_mask != of.required_mask) return false;
+    return true;
+}
+
+fn isValid_ref_local(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const ls: *const LinkedSchema = @ptrCast(@alignCast(data));
+    return validateLinkedSchema(ls.*, instance, compiled);
+}
+
+fn isValid_additional_properties_false(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const ap: *const CompiledValidator.AdditionalPropertiesFalseData = @ptrCast(@alignCast(data));
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    var covered: usize = 0;
+    for (ap.property_names) |name| {
+        if (obj.get(name) != null) covered += 1;
+    }
+    if (obj.count() <= covered) return true;
+    if (ap.pattern_regexes) |patterns| {
+        const keys = obj.keys();
+        for (keys) |key| {
+            var found = false;
             for (ap.property_names) |name| {
-                if (obj.get(name) != null) covered += 1;
+                if (key.len == name.len and std.mem.eql(u8, key, name)) {
+                    found = true;
+                    break;
+                }
             }
-            if (obj.count() <= covered) return true;
-            // Some uncovered — check against pattern regexes
-            if (ap.pattern_regexes) |patterns| {
-                const keys = obj.keys();
-                for (keys) |key| {
-                    var found = false;
-                    for (ap.property_names) |name| {
-                        if (key.len == name.len and std.mem.eql(u8, key, name)) {
-                            found = true;
+            if (!found) {
+                var pattern_match = false;
+                for (patterns) |cr| {
+                    if (cr.simple_prefix) |prefix| {
+                        if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
+                            pattern_match = true;
                             break;
                         }
-                    }
-                    if (!found) {
-                        var pattern_match = false;
-                        for (patterns) |cr| {
-                            if (cr.simple_prefix) |prefix| {
-                                if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
-                                    pattern_match = true;
-                                    break;
-                                }
-                            } else if (cr.is_identifier) {
-                                if (matchesIdentifierPattern(key)) {
-                                    pattern_match = true;
-                                    break;
-                                }
-                            } else {
-                                return null; // Can't check complex regex without allocator
-                            }
+                    } else if (cr.is_identifier) {
+                        if (matchesIdentifierPattern(key)) {
+                            pattern_match = true;
+                            break;
                         }
-                        if (!pattern_match) return false;
+                    } else {
+                        return null;
                     }
                 }
-                return true;
+                if (!pattern_match) return false;
             }
-            return false;
-        },
-        .additional_properties_schema => |ap| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            // Fast check: if all properties are defined, no additional props to validate
-            var covered: usize = 0;
-            for (ap.property_names) |name| {
-                if (obj.get(name) != null) covered += 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+fn isValid_additional_properties_schema(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const ap: *const AdditionalPropsSchemaCompiled = @ptrCast(@alignCast(data));
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    var covered: usize = 0;
+    for (ap.property_names) |name| {
+        if (obj.get(name) != null) covered += 1;
+    }
+    if (obj.count() <= covered) return true;
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const prop_name = entry.key_ptr.*;
+        var is_defined = false;
+        for (ap.property_names) |name| {
+            if (std.mem.eql(u8, prop_name, name)) {
+                is_defined = true;
+                break;
             }
-            if (obj.count() <= covered) return true;
-            // Has additional properties — validate each against schema
-            var it = obj.iterator();
-            while (it.next()) |entry| {
-                const prop_name = entry.key_ptr.*;
-                var is_defined = false;
-                for (ap.property_names) |name| {
-                    if (std.mem.eql(u8, prop_name, name)) {
-                        is_defined = true;
-                        break;
-                    }
-                }
-                if (!is_defined) {
-                    const result = validateLinkedSchema(ap.schema, entry.value_ptr.*, compiled) orelse return null;
-                    if (!result) return false;
-                }
-            }
-            return true;
-        },
-        .if_then_else_compiled => |ite| {
-            const if_result = validateLinkedSchema(ite.if_schema, instance, compiled) orelse return null;
-            if (if_result) {
-                if (ite.then_schema) |ts| {
-                    return validateLinkedSchema(ts, instance, compiled);
-                }
-                return true;
-            } else {
-                if (ite.else_schema) |es| {
-                    return validateLinkedSchema(es, instance, compiled);
-                }
-                return true;
-            }
-        },
-        .pattern_compiled => |cr| {
-            const instance_str = switch (instance) {
-                .string => |s| s,
-                else => return true,
-            };
-            if (!cr.valid) return true;
-            if (cr.simple_prefix) |prefix| {
-                return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
-            }
-            if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
-            if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
-            // Use stack buffer for null-termination (handles strings up to 511 bytes)
-            if (instance_str.len < 512) {
-                var buf: [512]u8 = undefined;
-                @memcpy(buf[0..instance_str.len], instance_str);
-                buf[instance_str.len] = 0;
-                return c.regexec(&cr.regex, &buf, 0, null, 0) == 0;
-            }
-            return null; // too long for stack buffer
-        },
-        .dependent_required_compiled => |deps| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            for (deps) |dep| {
-                if (obj.get(dep.trigger) != null) {
-                    for (dep.required) |req| {
-                        if (obj.get(req) == null) return false;
-                    }
+        }
+        if (!is_defined) {
+            const result = validateLinkedSchema(ap.schema, entry.value_ptr.*, compiled) orelse return null;
+            if (!result) return false;
+        }
+    }
+    return true;
+}
+
+fn isValid_if_then_else_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const ite: *const IfThenElseCompiled = @ptrCast(@alignCast(data));
+    const if_result = validateLinkedSchema(ite.if_schema, instance, compiled) orelse return null;
+    if (if_result) {
+        if (ite.then_schema) |ts| {
+            return validateLinkedSchema(ts, instance, compiled);
+        }
+        return true;
+    } else {
+        if (ite.else_schema) |es| {
+            return validateLinkedSchema(es, instance, compiled);
+        }
+        return true;
+    }
+}
+
+fn isValid_unevaluated_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const up: *const UnevalPropsCompiled = @ptrCast(@alignCast(data));
+    if (up.all_covered) return true;
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    const keys = obj.keys();
+    for (keys) |key| {
+        var found = false;
+        if (up.ceiling_map) |cm| {
+            found = cm.get(key) != null;
+        } else if (up.ceiling_arr) |ca| {
+            for (ca) |name| {
+                if (key.len == name.len and std.mem.eql(u8, key, name)) {
+                    found = true;
+                    break;
                 }
             }
-            return true;
-        },
-        .contains_compiled => |cc| {
-            const arr = switch (instance) {
-                .array => |a| a.items,
-                else => return true,
-            };
-            var match_count: usize = 0;
-            for (arr) |item| {
-                if (validateLinkedSchema(cc.schema, item, compiled)) |result| {
-                    if (result) {
-                        match_count += 1;
-                        // Early exit: exceeded maxContains
-                        if (cc.max_contains) |max| {
-                            if (match_count > max) return false;
-                        } else if (match_count >= cc.min_contains) {
-                            // No maxContains: once minContains reached, done
-                            return true;
-                        }
-                    }
-                } else return null;
-            }
-            if (match_count < cc.min_contains) return false;
-            return true;
-        },
-        .prefix_items_compiled => |schemas| {
-            const arr = switch (instance) {
-                .array => |a| a.items,
-                else => return true,
-            };
-            const count = @min(arr.len, schemas.len);
-            for (0..count) |i| {
-                const result = validateLinkedSchema(schemas[i], arr[i], compiled) orelse return null;
-                if (!result) return false;
-            }
-            return true;
-        },
-        .dependent_schemas_compiled => |deps| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            for (deps) |dep| {
-                if (obj.get(dep.trigger) != null) {
-                    const result = validateLinkedSchema(dep.schema, instance, compiled) orelse return null;
-                    if (!result) return false;
+        }
+        if (!found and up.pattern_regexes != null) {
+            for (up.pattern_regexes.?) |cr| {
+                if (cr.matches(key, null)) {
+                    found = true;
+                    break;
                 }
+                if (cr.simple_prefix == null and !cr.is_identifier and !cr.valid) return null;
             }
-            return true;
-        },
-        .property_names_compiled => |ls_ptr| {
-            const ls = ls_ptr.*;
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            if (ls.node) |pnode| {
-                if (!pnode.needs_uri_resolution) {
-                    const keys = obj.keys();
-                    for (keys) |key| {
-                        const name_val = std.json.Value{ .string = key };
-                        if (pnode.isValidFast(name_val, compiled)) |result| {
-                            if (!result) return false;
-                        } else return null;
-                    }
+        }
+        if (!found) return null;
+    }
+    return true;
+}
+
+fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const cr: *const CompiledRegex = @ptrCast(@alignCast(data));
+    const instance_str = switch (instance) {
+        .string => |s| s,
+        else => return true,
+    };
+    if (!cr.valid) return true;
+    if (cr.simple_prefix) |prefix| {
+        return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
+    }
+    if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
+    if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
+    if (instance_str.len < 512) {
+        var buf: [512]u8 = undefined;
+        @memcpy(buf[0..instance_str.len], instance_str);
+        buf[instance_str.len] = 0;
+        return c.regexec(&cr.regex, &buf, 0, null, 0) == 0;
+    }
+    return null;
+}
+
+fn isValid_dependent_required_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.DependentRequiredSliceWrapper = @ptrCast(@alignCast(data));
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    for (w.items) |dep| {
+        if (obj.get(dep.trigger) != null) {
+            for (dep.required) |req| {
+                if (obj.get(req) == null) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn isValid_contains_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const cc: *const ContainsCompiled = @ptrCast(@alignCast(data));
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    var match_count: usize = 0;
+    for (arr) |item| {
+        if (validateLinkedSchema(cc.schema, item, compiled)) |result| {
+            if (result) {
+                match_count += 1;
+                if (cc.max_contains) |max| {
+                    if (match_count > max) return false;
+                } else if (match_count >= cc.min_contains) {
                     return true;
                 }
             }
-            return null;
-        },
-        .unevaluated_properties_compiled => |up| {
-            if (up.all_covered) return true;
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            // Inline ceiling check (no allocation needed for hashmap + prefix match)
+        } else return null;
+    }
+    if (match_count < cc.min_contains) return false;
+    return true;
+}
+
+fn isValid_prefix_items_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.LinkedSchemaSliceWrapper = @ptrCast(@alignCast(data));
+    const schemas = w.items;
+    const arr = switch (instance) {
+        .array => |a| a.items,
+        else => return true,
+    };
+    const count = @min(arr.len, schemas.len);
+    for (0..count) |i| {
+        const result = validateLinkedSchema(schemas[i], arr[i], compiled) orelse return null;
+        if (!result) return false;
+    }
+    return true;
+}
+
+fn isValid_dependent_schemas_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.DependentSchemaSliceWrapper = @ptrCast(@alignCast(data));
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    for (w.items) |dep| {
+        if (obj.get(dep.trigger) != null) {
+            const result = validateLinkedSchema(dep.schema, instance, compiled) orelse return null;
+            if (!result) return false;
+        }
+    }
+    return true;
+}
+
+fn isValid_property_names_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const ls: *const LinkedSchema = @ptrCast(@alignCast(data));
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    if (ls.node) |pnode| {
+        if (!pnode.needs_uri_resolution) {
             const keys = obj.keys();
             for (keys) |key| {
-                var found = false;
-                if (up.ceiling_map) |cm| {
-                    found = cm.get(key) != null;
-                } else if (up.ceiling_arr) |ca| {
-                    for (ca) |name| {
-                        if (key.len == name.len and std.mem.eql(u8, key, name)) {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                if (!found and up.pattern_regexes != null) {
-                    for (up.pattern_regexes.?) |cr| {
-                        if (cr.matches(key, null)) {
-                            found = true;
-                            break;
-                        }
-                        // If matches returned false and we can't check further patterns
-                        if (cr.simple_prefix == null and !cr.is_identifier and !cr.valid) return null;
-                    }
-                }
-                if (!found) return null; // Can't determine — need full validation
-            }
-            return true; // All properties covered by ceiling
-        },
-        .pattern_properties_compiled => |pp_entries| {
-            const obj = switch (instance) {
-                .object => |o| o,
-                else => return true,
-            };
-            // Only handle if all patterns can be matched without allocation
-            for (pp_entries) |pp_entry| {
-                if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and pp_entry.regex.char_class == null and pp_entry.regex.literal_set == null) return null;
-            }
-            const keys = obj.keys();
-            const vals = obj.values();
-            for (keys, vals) |key, val| {
-                for (pp_entries) |pp_entry| {
-                    const matched = if (pp_entry.regex.simple_prefix) |prefix|
-                        key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)
-                    else if (pp_entry.regex.is_identifier)
-                        matchesIdentifierPattern(key)
-                    else if (pp_entry.regex.char_class) |bm|
-                        matchesCharClass(key, bm, pp_entry.regex.char_class_mode)
-                    else if (pp_entry.regex.literal_set) |lset| blk: {
-                        for (lset) |lit| {
-                            if (key.len == lit.len and std.mem.eql(u8, key, lit)) break :blk true;
-                        }
-                        break :blk false;
-                    } else
-                        false;
-                    if (matched) {
-                        const result = validateLinkedSchema(pp_entry.schema, val, compiled) orelse return null;
-                        if (!result) return false;
-                    }
-                }
+                const name_val = std.json.Value{ .string = key };
+                if (pnode.isValidFast(name_val, compiled)) |result| {
+                    if (!result) return false;
+                } else return null;
             }
             return true;
-        },
-        .generic => return null, // can't inline generic validators
+        }
     }
+    return null;
+}
+
+fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    const w: *const CompiledValidator.PatternPropertySliceWrapper = @ptrCast(@alignCast(data));
+    const pp_entries = w.items;
+    const obj = switch (instance) {
+        .object => |o| o,
+        else => return true,
+    };
+    for (pp_entries) |pp_entry| {
+        if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and pp_entry.regex.char_class == null and pp_entry.regex.literal_set == null) return null;
+    }
+    const keys = obj.keys();
+    const vals = obj.values();
+    for (keys, vals) |key, val| {
+        for (pp_entries) |pp_entry| {
+            const matched = if (pp_entry.regex.simple_prefix) |prefix|
+                key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)
+            else if (pp_entry.regex.is_identifier)
+                matchesIdentifierPattern(key)
+            else if (pp_entry.regex.char_class) |bm|
+                matchesCharClass(key, bm, pp_entry.regex.char_class_mode)
+            else if (pp_entry.regex.literal_set) |lset| blk: {
+                for (lset) |lit| {
+                    if (key.len == lit.len and std.mem.eql(u8, key, lit)) break :blk true;
+                }
+                break :blk false;
+            } else
+                false;
+            if (matched) {
+                const result = validateLinkedSchema(pp_entry.schema, val, compiled) orelse return null;
+                if (!result) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn isValid_generic(_: *allowzero const anyopaque, _: std.json.Value, _: *const CompiledSchema) ?bool {
+    return null;
 }
 
 /// Info about a nested array pattern (e.g., [[number]] or [[[number]]]).
@@ -1142,12 +1254,16 @@ fn getNestedSimpleType(node: *const CompiledNode) ?NestedArrayInfo {
     var items_node: ?*const CompiledNode = null;
 
     for (node.validators) |nv| {
-        switch (nv) {
-            .type_single => |st| {
+        switch (nv.tag) {
+            .type_single => {
+                const st = nv.getData(SimpleType);
                 if (st == .array) has_type_array = true else return null;
             },
-            .min_items => |m| min_items = m,
-            .items_compiled => |ic| {
+            .min_items => {
+                min_items = nv.getData(u64);
+            },
+            .items_compiled => {
+                const ic: *const ItemsCompiled = nv.getData(*const ItemsCompiled);
                 items_node = if (ic.schema.node) |n| n else return null;
             },
             .object_fast, .required, .properties_compiled, .generic,
@@ -1203,8 +1319,9 @@ fn validateNestedArray(instance: std.json.Value, inner_type: SimpleType, min_ite
 /// Check if all $ref in the validators are pre-linked (ref_local).
 fn allRefsPreLinked(validators: []const CompiledValidator) bool {
     for (validators) |v| {
-        switch (v) {
-            .generic => |g| {
+        switch (v.tag) {
+            .generic => {
+                const g: *const GenericValidator = v.getData(*const GenericValidator);
                 if (std.mem.eql(u8, g.keyword_name, "$ref")) return false;
             },
             .ref_local => {},
@@ -1217,9 +1334,10 @@ fn allRefsPreLinked(validators: []const CompiledValidator) bool {
 /// Check if validators always pass (no-op schema).
 fn isAlwaysValid(validators: []const CompiledValidator) bool {
     for (validators) |v| {
-        switch (v) {
-            .pattern_properties_compiled => |pp_entries| {
-                for (pp_entries) |entry| {
+        switch (v.tag) {
+            .pattern_properties_compiled => {
+                const w: *const CompiledValidator.PatternPropertySliceWrapper = v.getData(*const CompiledValidator.PatternPropertySliceWrapper);
+                for (w.items) |entry| {
                     if (entry.schema.value != .bool or !entry.schema.value.bool) return false;
                 }
             },
@@ -1278,8 +1396,9 @@ fn optimizeRefResolution(root_schema: std.json.Value, node_map: *const CompiledS
             // Check if ALL refs in this node are fully inlinable
             var can_clear = true;
             for (node.validators) |v| {
-                switch (v) {
-                    .generic => |g| {
+                switch (v.tag) {
+                    .generic => {
+                        const g: *const GenericValidator = v.getData(*const GenericValidator);
                         if (std.mem.eql(u8, g.keyword_name, "$ref")) {
                             const ref_str = switch (g.keyword_value) {
                                 .string => |s| s,
@@ -1301,7 +1420,8 @@ fn optimizeRefResolution(root_schema: std.json.Value, node_map: *const CompiledS
                             } else can_clear = false;
                         }
                     },
-                    .ref_local => |ls| {
+                    .ref_local => {
+                        const ls: *const LinkedSchema = v.getData(*const LinkedSchema);
                         if (ls.node) |target| {
                             if (target.needs_uri_resolution and !target.always_valid) {
                                 can_clear = false;
@@ -1328,10 +1448,11 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
     if (node.ref_overrides) return false;
     if (node.simple_type != .none) return true;
     for (node.validators) |v| {
-        switch (v) {
+        switch (v.tag) {
             .generic => return false,
-            .pattern_properties_compiled => |pp| {
-                for (pp) |entry| {
+            .pattern_properties_compiled => {
+                const w: *const CompiledValidator.PatternPropertySliceWrapper = v.getData(*const CompiledValidator.PatternPropertySliceWrapper);
+                for (w.items) |entry| {
                     if (entry.regex.simple_prefix == null and !entry.regex.is_identifier and entry.regex.char_class == null and entry.regex.literal_set == null) return false;
                 }
             },
@@ -1378,8 +1499,9 @@ fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) Li
             } else {
                 // Check validators for type constraints
                 for (n.validators) |v| {
-                    switch (v) {
-                        .type_single => |st| {
+                    switch (v.tag) {
+                        .type_single => {
+                            const st = v.getData(SimpleType);
                             mask = typeMaskForString(switch (st) {
                                 .null => "null",
                                 .boolean => "boolean",
@@ -1392,9 +1514,10 @@ fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) Li
                             });
                             break;
                         },
-                        .type_multi => |types| {
+                        .type_multi => {
+                            const w: *const CompiledValidator.SimpleTypeSliceWrapper = v.getData(*const CompiledValidator.SimpleTypeSliceWrapper);
                             mask = 0;
-                            for (types) |st| {
+                            for (w.items) |st| {
                                 mask |= typeMaskForString(switch (st) {
                                     .null => "null",
                                     .boolean => "boolean",
@@ -1472,7 +1595,7 @@ fn compileNode(
                             if (resolved) |r| {
                                 if (alloc.create(LinkedSchema)) |ls| {
                                     ls.* = linkSchema(node_map, r);
-                                    validators.append(.{ .ref_local = ls }) catch {};
+                                    validators.append(CompiledValidator.initPtr(.ref_local, ls, &isValid_ref_local)) catch {};
                                 } else |_| {}
                             }
                         }
@@ -1523,8 +1646,9 @@ fn compileNode(
             // 4b. Replace generic unevaluatedProperties with compiled variant
             if (unevaluated_ceiling != null or unevaluated_all_covered) {
                 for (validators.items, 0..) |v, vi| {
-                    switch (v) {
-                        .generic => |g| {
+                    switch (v.tag) {
+                        .generic => {
+                            const g: *const GenericValidator = v.getData(*const GenericValidator);
                             if (std.mem.eql(u8, g.keyword_name, "unevaluatedProperties")) {
                                 if (alloc.create(UnevalPropsCompiled)) |up| {
                                     up.* = .{
@@ -1534,7 +1658,7 @@ fn compileNode(
                                         .pattern_regexes = unevaluated_pattern_regexes,
                                         .all_covered = unevaluated_all_covered,
                                     };
-                                    validators.items[vi] = .{ .unevaluated_properties_compiled = up };
+                                    validators.items[vi] = CompiledValidator.initPtr(.unevaluated_properties_compiled, up, &isValid_unevaluated_properties_compiled);
                                 } else |_| {}
                                 break;
                             }
@@ -1550,31 +1674,30 @@ fn compileNode(
             var effective_simple_type = detectSimpleType(obj);
             var effective_always_valid = !ref_overrides and (final_validators.len == 0 or isAlwaysValid(final_validators));
             if (ref_overrides and final_validators.len == 1) {
-                switch (final_validators[0]) {
-                    .ref_local => |ls| {
-                        if (ls.node) |target| {
-                            if (target.simple_type != .none) {
-                                effective_simple_type = target.simple_type;
-                            } else {
-                                // Check if target has object_fast (implies .object type)
-                                for (target.validators) |tv| {
-                                    switch (tv) {
-                                        .object_fast => |of| {
-                                            if (of.has_type_object) effective_simple_type = .object;
-                                            break;
-                                        },
-                                        .type_single => |st| {
-                                            effective_simple_type = st;
-                                            break;
-                                        },
-                                        else => {},
-                                    }
+                if (final_validators[0].tag == .ref_local) {
+                    const ls: *const LinkedSchema = final_validators[0].getData(*const LinkedSchema);
+                    if (ls.node) |target| {
+                        if (target.simple_type != .none) {
+                            effective_simple_type = target.simple_type;
+                        } else {
+                            // Check if target has object_fast (implies .object type)
+                            for (target.validators) |tv| {
+                                switch (tv.tag) {
+                                    .object_fast => {
+                                        const of: *const ObjectFastCompiled = tv.getData(*const ObjectFastCompiled);
+                                        if (of.has_type_object) effective_simple_type = .object;
+                                        break;
+                                    },
+                                    .type_single => {
+                                        effective_simple_type = tv.getData(SimpleType);
+                                        break;
+                                    },
+                                    else => {},
                                 }
                             }
-                            if (target.always_valid) effective_always_valid = true;
                         }
-                    },
-                    else => {},
+                        if (target.always_valid) effective_always_valid = true;
+                    }
                 }
             }
             node.* = .{
@@ -1638,18 +1761,28 @@ fn compileKeywords(
                     for (kv.array.items) |item| {
                         hm.put(item.string, {}) catch {};
                     }
-                    validators.append(.{ .enum_string_set = hm }) catch {};
+                    validators.append(CompiledValidator.initPtr(.enum_string_set, hm, &isValid_enum_string_set)) catch {};
                 } else |_| {
-                    switch (kv) { .array => |a| validators.append(.{ .enum_check = a.items }) catch {}, else => {} }
+                    switch (kv) { .array => |a| {
+                        if (alloc.create(CompiledValidator.SliceWrapper)) |w| {
+                            w.* = .{ .items = a.items };
+                            validators.append(CompiledValidator.initPtr(.enum_check, w, &isValid_enum_check)) catch {};
+                        } else |_| {}
+                    }, else => {} }
                 }
             } else {
-                switch (kv) { .array => |a| validators.append(.{ .enum_check = a.items }) catch {}, else => {} }
+                switch (kv) { .array => |a| {
+                    if (alloc.create(CompiledValidator.SliceWrapper)) |w| {
+                        w.* = .{ .items = a.items };
+                        validators.append(CompiledValidator.initPtr(.enum_check, w, &isValid_enum_check)) catch {};
+                    } else |_| {}
+                }, else => {} }
             }
         }
     }
     if (obj.get("const")) |kv| {
         if (!validation_vocab_disabled) {
-            if (alloc.create(std.json.Value)) |vp| { vp.* = kv; validators.append(.{ .const_check = vp }) catch {}; } else |_| {}
+            if (alloc.create(std.json.Value)) |vp| { vp.* = kv; validators.append(CompiledValidator.initPtr(.const_check, vp, &isValid_const_check)) catch {}; } else |_| {}
         }
     }
 
@@ -1657,35 +1790,35 @@ fn compileKeywords(
     if (obj.get("minimum")) |kv| {
         if (!validation_vocab_disabled) {
             if (getNumber(kv)) |limit| {
-                validators.append(.{ .minimum = limit }) catch {};
+                validators.append(CompiledValidator.initInlineF64(.minimum, limit, &isValid_minimum)) catch {};
             }
         }
     }
     if (obj.get("maximum")) |kv| {
         if (!validation_vocab_disabled) {
             if (getNumber(kv)) |limit| {
-                validators.append(.{ .maximum = limit }) catch {};
+                validators.append(CompiledValidator.initInlineF64(.maximum, limit, &isValid_maximum)) catch {};
             }
         }
     }
     if (obj.get("exclusiveMinimum")) |kv| {
         if (!validation_vocab_disabled) {
             if (getNumber(kv)) |limit| {
-                validators.append(.{ .exclusive_minimum = limit }) catch {};
+                validators.append(CompiledValidator.initInlineF64(.exclusive_minimum, limit, &isValid_exclusive_minimum)) catch {};
             }
         }
     }
     if (obj.get("exclusiveMaximum")) |kv| {
         if (!validation_vocab_disabled) {
             if (getNumber(kv)) |limit| {
-                validators.append(.{ .exclusive_maximum = limit }) catch {};
+                validators.append(CompiledValidator.initInlineF64(.exclusive_maximum, limit, &isValid_exclusive_maximum)) catch {};
             }
         }
     }
     if (obj.get("multipleOf")) |kv| {
         if (!validation_vocab_disabled) {
             if (getNumber(kv)) |divisor| {
-                validators.append(.{ .multiple_of = divisor }) catch {};
+                validators.append(CompiledValidator.initInlineF64(.multiple_of, divisor, &isValid_multiple_of)) catch {};
             }
         }
     }
@@ -1694,20 +1827,20 @@ fn compileKeywords(
     if (obj.get("minLength")) |kv| {
         if (!validation_vocab_disabled) {
             if (getUint(kv)) |limit| {
-                validators.append(.{ .min_length = limit }) catch {};
+                validators.append(CompiledValidator.initInlineU64(.min_length, limit, &isValid_min_length)) catch {};
             }
         }
     }
     if (obj.get("maxLength")) |kv| {
         if (!validation_vocab_disabled) {
             if (getUint(kv)) |limit| {
-                validators.append(.{ .max_length = limit }) catch {};
+                validators.append(CompiledValidator.initInlineU64(.max_length, limit, &isValid_max_length)) catch {};
             }
         }
     }
     if (obj.get("pattern")) |kv| {
         if (compileRegex(alloc, kv, regex_list)) |cr| {
-            validators.append(.{ .pattern_compiled = cr }) catch {};
+            validators.append(CompiledValidator.initPtr(.pattern_compiled, cr, &isValid_pattern_compiled)) catch {};
         } else {
             validators.append(makeGeneric(alloc, @import("keywords/pattern.zig").validate, kv, "pattern")) catch {};
         }
@@ -1717,7 +1850,13 @@ fn compileKeywords(
     if (obj.get("prefixItems")) |kv| {
         switch (kv) {
             .array => |arr| {
-                validators.append(.{ .prefix_items_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+                {
+                    const linked = linkSchemaArray(alloc, node_map, arr.items);
+                    if (alloc.create(CompiledValidator.LinkedSchemaSliceWrapper)) |w| {
+                        w.* = .{ .items = linked };
+                        validators.append(CompiledValidator.initPtr(.prefix_items_compiled, w, &isValid_prefix_items_compiled)) catch {};
+                    } else |_| {}
+                }
             },
             else => {},
         }
@@ -1733,13 +1872,19 @@ fn compileKeywords(
                             else => 0,
                         } else 0,
                     };
-                    validators.append(.{ .items_compiled = ic_val }) catch {};
+                    validators.append(CompiledValidator.initPtr(.items_compiled, ic_val, &isValid_items_compiled)) catch {};
                 } else |_| {}
             },
             .array => |arr| {
                 var linked = std.ArrayList(LinkedSchema).init(alloc);
                 for (arr.items) |item| linked.append(linkSchema(node_map, item)) catch {};
-                if (linked.items.len > 0) validators.append(.{ .prefix_items_compiled = linked.toOwnedSlice() catch &.{} }) catch {};
+                if (linked.items.len > 0) {
+                    const slice = linked.toOwnedSlice() catch &.{};
+                    if (alloc.create(CompiledValidator.LinkedSchemaSliceWrapper)) |w| {
+                        w.* = .{ .items = slice };
+                        validators.append(CompiledValidator.initPtr(.prefix_items_compiled, w, &isValid_prefix_items_compiled)) catch {};
+                    } else |_| {}
+                }
             },
             else => {},
         }
@@ -1750,7 +1895,7 @@ fn compileKeywords(
             if (tuple_len > 0) {
                 if (alloc.create(ItemsCompiled)) |ic| {
                     ic.* = .{ .schema = linkSchema(node_map, ai_kv), .prefix_count = tuple_len, .is_additional_items = true };
-                    validators.append(.{ .items_compiled = ic }) catch {};
+                    validators.append(CompiledValidator.initPtr(.items_compiled, ic, &isValid_items_compiled)) catch {};
                 } else |_| {
                     validators.append(makeGeneric(alloc, @import("keywords/additional_items.zig").validate, ai_kv, "additionalItems")) catch {};
                 }
@@ -1764,14 +1909,14 @@ fn compileKeywords(
     if (obj.get("minItems")) |kv| {
         if (!validation_vocab_disabled) {
             if (getUint(kv)) |limit| {
-                validators.append(.{ .min_items = limit }) catch {};
+                validators.append(CompiledValidator.initInlineU64(.min_items, limit, &isValid_min_items)) catch {};
             }
         }
     }
     if (obj.get("maxItems")) |kv| {
         if (!validation_vocab_disabled) {
             if (getUint(kv)) |limit| {
-                validators.append(.{ .max_items = limit }) catch {};
+                validators.append(CompiledValidator.initInlineU64(.max_items, limit, &isValid_max_items)) catch {};
             }
         }
     }
@@ -1780,7 +1925,7 @@ fn compileKeywords(
             switch (kv) {
                 .bool => |b| {
                     if (b) {
-                        validators.append(.{ .unique_items = {} }) catch {};
+                        validators.append(.{ .isValid_fn = &isValid_unique_items, .data = @ptrFromInt(@as(usize, 1)), .tag = .unique_items }) catch {};
                     }
                 },
                 else => {},
@@ -1802,7 +1947,7 @@ fn compileKeywords(
                 .min_contains = min_c,
                 .max_contains = max_c,
             };
-            validators.append(.{ .contains_compiled = cc_val }) catch {};
+            validators.append(CompiledValidator.initPtr(.contains_compiled, cc_val, &isValid_contains_compiled)) catch {};
         } else |_| {}
     }
 
@@ -1818,7 +1963,13 @@ fn compileKeywords(
                         .schema = linkSchema(node_map, entry.value_ptr.*),
                     }) catch {};
                 }
-                validators.append(.{ .properties_compiled = entries.toOwnedSlice() catch &.{} }) catch {};
+                {
+                    const slice = entries.toOwnedSlice() catch &.{};
+                    if (alloc.create(CompiledValidator.PropertyEntrySliceWrapper)) |w| {
+                        w.* = .{ .items = slice };
+                        validators.append(CompiledValidator.initPtr(.properties_compiled, w, &isValid_properties_compiled)) catch {};
+                    } else |_| {}
+                }
             },
             else => {},
         }
@@ -1826,7 +1977,10 @@ fn compileKeywords(
     if (obj.get("required")) |kv| {
         if (!validation_vocab_disabled) {
             if (compileRequired(alloc, kv)) |names| {
-                validators.append(.{ .required = names }) catch {};
+                if (alloc.create(CompiledValidator.StringSliceWrapper)) |w| {
+                    w.* = .{ .items = names };
+                    validators.append(CompiledValidator.initPtr(.required, w, &isValid_required)) catch {};
+                } else |_| {}
             }
         }
     }
@@ -1852,17 +2006,17 @@ fn compileKeywords(
         switch (kv) {
             .bool => |b| {
                 if (!b) {
-                    validators.append(.{ .additional_properties_false = .{
-                        .property_names = prop_names,
-                        .pattern_regexes = ap_patterns,
-                    } }) catch {};
+                    if (alloc.create(CompiledValidator.AdditionalPropertiesFalseData)) |apd| {
+                        apd.* = .{ .property_names = prop_names, .pattern_regexes = ap_patterns };
+                        validators.append(CompiledValidator.initPtr(.additional_properties_false, apd, &isValid_additional_properties_false)) catch {};
+                    } else |_| {}
                 }
                 // true means allow everything — no validator needed
             },
             .object => {
                 if (alloc.create(AdditionalPropsSchemaCompiled)) |aps| {
                     aps.* = .{ .schema = linkSchema(node_map, kv), .property_names = prop_names };
-                    validators.append(.{ .additional_properties_schema = aps }) catch {};
+                    validators.append(CompiledValidator.initPtr(.additional_properties_schema, aps, &isValid_additional_properties_schema)) catch {};
                 } else |_| {}
             },
             else => {},
@@ -1871,7 +2025,10 @@ fn compileKeywords(
     if (obj.get("patternProperties")) |kv| {
         // Try to pre-compile regex patterns
         if (compilePatternProperties(alloc, kv, node_map, regex_list)) |compiled_pp| {
-            validators.append(.{ .pattern_properties_compiled = compiled_pp }) catch {};
+            if (alloc.create(CompiledValidator.PatternPropertySliceWrapper)) |w| {
+                w.* = .{ .items = compiled_pp };
+                validators.append(CompiledValidator.initPtr(.pattern_properties_compiled, w, &isValid_pattern_properties_compiled)) catch {};
+            } else |_| {}
         } else {
             validators.append(makeGeneric(alloc, @import("keywords/pattern_properties.zig").validate, kv, "patternProperties")) catch {};
         }
@@ -1879,19 +2036,19 @@ fn compileKeywords(
     if (obj.get("minProperties")) |kv| {
         if (!validation_vocab_disabled) {
             if (getUint(kv)) |limit| {
-                validators.append(.{ .min_properties = limit }) catch {};
+                validators.append(CompiledValidator.initInlineU64(.min_properties, limit, &isValid_min_properties)) catch {};
             }
         }
     }
     if (obj.get("maxProperties")) |kv| {
         if (!validation_vocab_disabled) {
             if (getUint(kv)) |limit| {
-                validators.append(.{ .max_properties = limit }) catch {};
+                validators.append(CompiledValidator.initInlineU64(.max_properties, limit, &isValid_max_properties)) catch {};
             }
         }
     }
     if (obj.get("propertyNames")) |kv| {
-        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(.{ .property_names_compiled = ls }) catch {}; } else |_| {}
+        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(CompiledValidator.initPtr(.property_names_compiled, ls, &isValid_property_names_compiled)) catch {}; } else |_| {}
     }
     if (obj.get("dependencies")) |kv| {
         validators.append(makeGeneric(alloc, @import("keywords/dependencies.zig").validate, kv, "dependencies")) catch {};
@@ -1928,10 +2085,22 @@ fn compileKeywords(
             if (dr_entries.items.len > 0 or ds_entries.items.len > 0) {
                 _ = validators.pop(); // remove the generic we just added
                 if (dr_entries.items.len > 0) {
-                    validators.append(.{ .dependent_required_compiled = dr_entries.toOwnedSlice() catch &.{} }) catch {};
+                    {
+                        const slice = dr_entries.toOwnedSlice() catch &.{};
+                        if (alloc.create(CompiledValidator.DependentRequiredSliceWrapper)) |w| {
+                            w.* = .{ .items = slice };
+                            validators.append(CompiledValidator.initPtr(.dependent_required_compiled, w, &isValid_dependent_required_compiled)) catch {};
+                        } else |_| {}
+                    }
                 }
                 if (ds_entries.items.len > 0) {
-                    validators.append(.{ .dependent_schemas_compiled = ds_entries.toOwnedSlice() catch &.{} }) catch {};
+                    {
+                        const slice = ds_entries.toOwnedSlice() catch &.{};
+                        if (alloc.create(CompiledValidator.DependentSchemaSliceWrapper)) |w| {
+                            w.* = .{ .items = slice };
+                            validators.append(CompiledValidator.initPtr(.dependent_schemas_compiled, w, &isValid_dependent_schemas_compiled)) catch {};
+                        } else |_| {}
+                    }
                 }
             }
         }
@@ -1955,7 +2124,13 @@ fn compileKeywords(
                     }
                 }
                 if (dr_entries.items.len > 0) {
-                    validators.append(.{ .dependent_required_compiled = dr_entries.toOwnedSlice() catch &.{} }) catch {};
+                    {
+                        const slice = dr_entries.toOwnedSlice() catch &.{};
+                        if (alloc.create(CompiledValidator.DependentRequiredSliceWrapper)) |w| {
+                            w.* = .{ .items = slice };
+                            validators.append(CompiledValidator.initPtr(.dependent_required_compiled, w, &isValid_dependent_required_compiled)) catch {};
+                        } else |_| {}
+                    }
                 }
             }
         }
@@ -1971,7 +2146,13 @@ fn compileKeywords(
                         .schema = linkSchema(node_map, dep_entry.value_ptr.*),
                     }) catch {};
                 }
-                validators.append(.{ .dependent_schemas_compiled = dep_entries.toOwnedSlice() catch &.{} }) catch {};
+                {
+                    const slice = dep_entries.toOwnedSlice() catch &.{};
+                    if (alloc.create(CompiledValidator.DependentSchemaSliceWrapper)) |w| {
+                        w.* = .{ .items = slice };
+                        validators.append(CompiledValidator.initPtr(.dependent_schemas_compiled, w, &isValid_dependent_schemas_compiled)) catch {};
+                    } else |_| {}
+                }
             },
             else => {},
         }
@@ -1981,7 +2162,13 @@ fn compileKeywords(
     if (obj.get("allOf")) |kv| {
         switch (kv) {
             .array => |arr| {
-                validators.append(.{ .all_of_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+                {
+                    const linked = linkSchemaArray(alloc, node_map, arr.items);
+                    if (alloc.create(CompiledValidator.LinkedSchemaSliceWrapper)) |w| {
+                        w.* = .{ .items = linked };
+                        validators.append(CompiledValidator.initPtr(.all_of_compiled, w, &isValid_all_of_compiled)) catch {};
+                    } else |_| {}
+                }
             },
             else => {},
         }
@@ -1989,7 +2176,13 @@ fn compileKeywords(
     if (obj.get("anyOf")) |kv| {
         switch (kv) {
             .array => |arr| {
-                validators.append(.{ .any_of_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+                {
+                    const linked = linkSchemaArray(alloc, node_map, arr.items);
+                    if (alloc.create(CompiledValidator.LinkedSchemaSliceWrapper)) |w| {
+                        w.* = .{ .items = linked };
+                        validators.append(CompiledValidator.initPtr(.any_of_compiled, w, &isValid_any_of_compiled)) catch {};
+                    } else |_| {}
+                }
             },
             else => {},
         }
@@ -2002,14 +2195,14 @@ fn compileKeywords(
                 const disc = detectDiscriminator(alloc, arr.items, linked);
                 if (alloc.create(OneOfCompiled)) |oo| {
                     oo.* = .{ .schemas = linked, .discriminator_field = disc.field, .discriminator_map = disc.map, .discriminator_is_exists = disc.is_exists };
-                    validators.append(.{ .one_of_compiled = oo }) catch {};
+                    validators.append(CompiledValidator.initPtr(.one_of_compiled, oo, &isValid_one_of_compiled)) catch {};
                 } else |_| {}
             },
             else => {},
         }
     }
     if (obj.get("not")) |kv| {
-        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(.{ .not_compiled = ls }) catch {}; } else |_| {}
+        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(CompiledValidator.initPtr(.not_compiled, ls, &isValid_not_compiled)) catch {}; } else |_| {}
     }
 
     // Reference
@@ -2034,7 +2227,7 @@ fn compileKeywords(
             if (resolved) |r| {
                 if (alloc.create(LinkedSchema)) |ls| {
                     ls.* = linkSchema(node_map, r);
-                    validators.append(.{ .ref_local = ls }) catch {};
+                    validators.append(CompiledValidator.initPtr(.ref_local, ls, &isValid_ref_local)) catch {};
                 } else |_| {}
             } else {
                 validators.append(makeGeneric(alloc, @import("keywords/ref.zig").validate, kv, "$ref")) catch {};
@@ -2057,7 +2250,7 @@ fn compileKeywords(
                 .then_schema = if (then_val) |tv| linkSchema(node_map, tv) else null,
                 .else_schema = if (else_val) |ev| linkSchema(node_map, ev) else null,
             };
-            validators.append(.{ .if_then_else_compiled = ite }) catch {};
+            validators.append(CompiledValidator.initPtr(.if_then_else_compiled, ite, &isValid_if_then_else_compiled)) catch {};
         } else |_| {}
     }
 
@@ -2225,22 +2418,26 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
     var has_incompatible = false;
 
     for (validators.items, 0..) |v, i| {
-        switch (v) {
-            .type_single => |st| {
+        switch (v.tag) {
+            .type_single => {
+                const st = v.getData(SimpleType);
                 if (st == .object) {
                     has_type_object = true;
                     type_idx = i;
                 }
             },
-            .required => |r| {
-                required_data = r;
+            .required => {
+                const w: *const CompiledValidator.StringSliceWrapper = v.getData(*const CompiledValidator.StringSliceWrapper);
+                required_data = w.items;
                 required_idx = i;
             },
-            .properties_compiled => |p| {
-                properties_data = p;
+            .properties_compiled => {
+                const w: *const CompiledValidator.PropertyEntrySliceWrapper = v.getData(*const CompiledValidator.PropertyEntrySliceWrapper);
+                properties_data = w.items;
                 properties_idx = i;
             },
-            .additional_properties_false => |apf| {
+            .additional_properties_false => {
+                const apf: *const CompiledValidator.AdditionalPropertiesFalseData = v.getData(*const CompiledValidator.AdditionalPropertiesFalseData);
                 // Only merge if no pattern regexes (object_fast can't handle patterns)
                 if (apf.pattern_regexes == null) {
                     additional_false = true;
@@ -2260,8 +2457,10 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
     // This eliminates separate allOf branch evaluations for common patterns like
     // tsconfig where each allOf branch adds one property definition
     for (validators.items, 0..) |v, vi| {
-        switch (v) {
-            .all_of_compiled => |schemas| {
+        switch (v.tag) {
+            .all_of_compiled => {
+                const schemas_w: *const CompiledValidator.LinkedSchemaSliceWrapper = v.getData(*const CompiledValidator.LinkedSchemaSliceWrapper);
+                const schemas = schemas_w.items;
                 var merged_props = std.ArrayList(PropertyEntry).init(alloc);
                 // Start with existing properties
                 if (properties_data) |pd| {
@@ -2273,28 +2472,28 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
                     // Check if this branch is a ref_local → properties-only target
                     if (s.node) |snode| {
                         if (snode.ref_overrides and snode.validators.len == 1) {
-                            switch (snode.validators[0]) {
-                                .ref_local => |ls| {
-                                    if (ls.node) |target| {
-                                        // Target must be properties-only (object_fast with no required, no additional)
-                                        for (target.validators) |tv| {
-                                            switch (tv) {
-                                                .object_fast => |of| {
-                                                    if (of.required_mask == 0 and !of.additional_false) {
-                                                        for (of.properties) |p| merged_props.append(p) catch {};
-                                                        continue;
-                                                    }
-                                                },
-                                                .properties_compiled => |pc| {
-                                                    for (pc) |p| merged_props.append(p) catch {};
+                            if (snode.validators[0].tag == .ref_local) {
+                                const ls: *const LinkedSchema = snode.validators[0].getData(*const LinkedSchema);
+                                if (ls.node) |target| {
+                                    // Target must be properties-only (object_fast with no required, no additional)
+                                    for (target.validators) |tv| {
+                                        switch (tv.tag) {
+                                            .object_fast => {
+                                                const of: *const ObjectFastCompiled = tv.getData(*const ObjectFastCompiled);
+                                                if (of.required_mask == 0 and !of.additional_false) {
+                                                    for (of.properties) |p| merged_props.append(p) catch {};
                                                     continue;
-                                                },
-                                                else => {},
-                                            }
+                                                }
+                                            },
+                                            .properties_compiled => {
+                                                const pc_w: *const CompiledValidator.PropertyEntrySliceWrapper = tv.getData(*const CompiledValidator.PropertyEntrySliceWrapper);
+                                                for (pc_w.items) |p| merged_props.append(p) catch {};
+                                                continue;
+                                            },
+                                            else => {},
                                         }
                                     }
-                                },
-                                else => {},
+                                }
                             }
                         }
                     }
@@ -2307,10 +2506,16 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
                     if (properties_idx == null) {
                         // Insert properties at allOf's position
                         properties_idx = vi;
-                        validators.items[vi] = .{ .properties_compiled = properties_data.? };
+                        if (alloc.create(CompiledValidator.PropertyEntrySliceWrapper)) |w| {
+                            w.* = .{ .items = properties_data.? };
+                            validators.items[vi] = CompiledValidator.initPtr(.properties_compiled, w, &isValid_properties_compiled);
+                        } else |_| {}
                     } else {
                         // Update existing properties and remove allOf
-                        validators.items[properties_idx.?] = .{ .properties_compiled = properties_data.? };
+                        if (alloc.create(CompiledValidator.PropertyEntrySliceWrapper)) |w| {
+                            w.* = .{ .items = properties_data.? };
+                            validators.items[properties_idx.?] = CompiledValidator.initPtr(.properties_compiled, w, &isValid_properties_compiled);
+                        } else |_| {}
                         _ = validators.orderedRemove(vi);
                     }
                 }
@@ -2375,7 +2580,7 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
         .has_type_object = has_type_object,
         .property_map = property_map,
     };
-    const merged = CompiledValidator{ .object_fast = of_val };
+    const merged = CompiledValidator.initPtr(.object_fast, of_val, &isValid_object_fast);
 
     // Remove the merged validators (in reverse order to preserve indices)
     var indices_to_remove = std.ArrayList(usize).init(alloc);
@@ -2401,9 +2606,9 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
 fn makeGeneric(alloc: Allocator, func: Validator.KeywordValidator, kv: std.json.Value, name: []const u8) CompiledValidator {
     if (alloc.create(GenericValidator)) |g| {
         g.* = .{ .func = func, .keyword_value = kv, .keyword_name = name };
-        return .{ .generic = g };
+        return CompiledValidator.initPtr(.generic, g, &isValid_generic);
     } else |_| {
-        return .{ .generic = undefined };
+        return .{ .isValid_fn = &isValid_generic, .data = @ptrFromInt(@as(usize, 1)), .tag = .generic };
     }
 }
 
@@ -2638,7 +2843,7 @@ fn compileType(alloc: Allocator, type_val: std.json.Value) ?CompiledValidator {
     switch (type_val) {
         .string => |s| {
             const st = detectSimpleTypeFromString(s);
-            if (st != .none) return .{ .type_single = st };
+            if (st != .none) return .{ .isValid_fn = &isValid_type_single, .data = CompiledValidator.inlineSimpleType(st), .tag = .type_single };
             return null;
         },
         .array => |arr| {
@@ -2655,7 +2860,11 @@ fn compileType(alloc: Allocator, type_val: std.json.Value) ?CompiledValidator {
                 }
             }
             if (types.items.len > 0) {
-                return .{ .type_multi = types.toOwnedSlice() catch &.{} };
+                const slice = types.toOwnedSlice() catch &.{};
+                if (alloc.create(CompiledValidator.SimpleTypeSliceWrapper)) |w| {
+                    w.* = .{ .items = slice };
+                    return CompiledValidator.initPtr(.type_multi, w, &isValid_type_multi);
+                } else |_| {}
             }
             return null;
         },
