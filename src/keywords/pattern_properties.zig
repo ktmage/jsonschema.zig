@@ -18,14 +18,10 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    const base_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "patternProperties");
-
     var pattern_it = pattern_schemas.iterator();
     while (pattern_it.next()) |pattern_entry| {
         const pattern = pattern_entry.key_ptr.*;
         const sub_schema = pattern_entry.value_ptr.*;
-
-        const pattern_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, pattern);
 
         // Pre-lookup compiled node once per pattern's sub_schema
         const sub_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |comp| comp.getNode(sub_schema) else null;
@@ -54,6 +50,9 @@ pub fn validate(ctx: Context) void {
                 // Fast path: skip path allocation for valid properties (node pre-looked-up)
                 if (ctx.compiled != null and ctx.isSubschemaValidWithNode(sub_schema, prop_value, sub_node)) continue;
 
+                // Lazy path allocation: only computed when validation fails the fast path
+                const base_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "patternProperties");
+                const pattern_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, pattern);
                 const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
 
                 const result = ctx.validateSubschema(sub_schema, prop_value, prop_instance_path, pattern_schema_path);

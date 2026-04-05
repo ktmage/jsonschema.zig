@@ -681,11 +681,12 @@ pub fn validateAll(ctx: Context) void {
                                 }
                             }
                         }
-                        // Non-discriminator: inline fast path
+                        // Non-discriminator: inline fast path with type mask
+                        const inst_mask = compiled_mod.typeMaskForValue(ctx.instance);
                         var fast_ok = true;
                         var match_count: usize = 0;
                         for (oo.schemas) |s| {
-                            if (!@import("keywords/one_of.zig").couldMatch(s.value, ctx.instance)) continue;
+                            if (s.type_mask & inst_mask == 0) continue;
                             if (s.node) |snode| {
                                 if (!snode.needs_uri_resolution) {
                                     if (snode.isValidFast(ctx.instance, compiled)) |result| {

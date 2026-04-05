@@ -148,6 +148,8 @@ pub const SimpleType = enum(u8) {
 pub const LinkedSchema = struct {
     node: ?*const CompiledNode,
     value: std.json.Value,
+    /// Pre-computed type bitmask: which JSON types this schema accepts.
+    type_mask: u8 = 0xFF,
 };
 
 /// A compiled property entry: property name + pre-linked sub-schema.
@@ -301,6 +303,52 @@ pub const DependentSchemaEntry = struct {
     trigger: []const u8,
     schema: LinkedSchema,
 };
+
+/// Pre-computed type bitmask for fast oneOf/anyOf branch filtering.
+/// Each bit represents a JSON type: null=1, bool=2, int=4, float=8, string=16, array=32, object=64
+pub fn typeMaskForValue(instance: std.json.Value) u8 {
+    return switch (instance) {
+        .null => 1,
+        .bool => 2,
+        .integer => 4 | 8, // integer matches both integer and number
+        .float => 8,
+        .number_string => 8,
+        .string => 16,
+        .array => 32,
+        .object => 64,
+    };
+}
+
+fn typeMaskForSchema(schema: std.json.Value) u8 {
+    const obj = switch (schema) {
+        .object => |o| o,
+        .bool => return 0xFF, // true schema accepts all types
+        else => return 0xFF,
+    };
+    const type_val = obj.get("type") orelse return 0xFF; // no type constraint = accept all
+    switch (type_val) {
+        .string => |s| return typeMaskForString(s),
+        .array => |arr| {
+            var mask: u8 = 0;
+            for (arr.items) |item| {
+                if (item == .string) mask |= typeMaskForString(item.string);
+            }
+            return if (mask != 0) mask else 0xFF;
+        },
+        else => return 0xFF,
+    }
+}
+
+fn typeMaskForString(s: []const u8) u8 {
+    if (std.mem.eql(u8, s, "null")) return 1;
+    if (std.mem.eql(u8, s, "boolean")) return 2;
+    if (std.mem.eql(u8, s, "integer")) return 4 | 8;
+    if (std.mem.eql(u8, s, "number")) return 4 | 8;
+    if (std.mem.eql(u8, s, "string")) return 16;
+    if (std.mem.eql(u8, s, "array")) return 32;
+    if (std.mem.eql(u8, s, "object")) return 64;
+    return 0xFF;
+}
 
 /// Discriminator entry for oneOf optimization: maps a string value to a branch.
 pub const DiscriminatorEntry = struct {
@@ -480,7 +528,7 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             return true;
         },
         .one_of_compiled => |oo| {
-            // Discriminator fast path: if we have a discriminator, look up directly
+            // Discriminator fast path
             if (oo.discriminator_field) |field| {
                 if (oo.discriminator_map) |dmap| {
                     const inst_obj = switch (instance) {
@@ -497,13 +545,14 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                             return validateLinkedSchema(entry.schema, instance, compiled);
                         }
                     }
-                    return false; // No matching discriminator value
+                    return false;
                 }
             }
-            // Fallback: check all branches
+            // Type-based filtering: skip branches that can't match the instance type
+            const inst_type_mask = typeMaskForValue(instance);
             var match_count: usize = 0;
             for (oo.schemas) |s| {
-                if (!@import("keywords/one_of.zig").couldMatch(s.value, instance)) continue;
+                if (s.type_mask & inst_type_mask == 0) continue; // type mismatch — skip
                 const result = validateLinkedSchema(s, instance, compiled) orelse return null;
                 if (result) {
                     match_count += 1;
@@ -513,8 +562,10 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             return match_count == 1;
         },
         .any_of_compiled => |schemas| {
+            const inst_mask = typeMaskForValue(instance);
             var any_null = false;
             for (schemas) |s| {
+                if (s.type_mask & inst_mask == 0) continue;
                 if (validateLinkedSchema(s, instance, compiled)) |result| {
                     if (result) return true;
                 } else {
@@ -965,7 +1016,7 @@ fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) Li
         .object => |o| node_map.get(@intFromPtr(o.keys().ptr)),
         else => null,
     };
-    return .{ .node = node, .value = value };
+    return .{ .node = node, .value = value, .type_mask = typeMaskForSchema(value) };
 }
 
 fn linkSchemaArray(alloc: Allocator, node_map: *const CompiledSchema.NodeMap, items: []const std.json.Value) []const LinkedSchema {

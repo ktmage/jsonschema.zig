@@ -26,8 +26,6 @@ pub fn validate(ctx: Context) void {
         else => null,
     } else null;
 
-    const additional_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "additionalProperties");
-
     // Pre-lookup compiled node for the additional properties schema once
     const additional_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |c| c.getNode(additional) else null;
 
@@ -62,13 +60,13 @@ pub fn validate(ctx: Context) void {
                     ) catch return;
                     ctx.addError("additionalProperties", msg);
                 }
-                // true means any additional properties are allowed
             },
             .object => {
                 // Fast path: skip path allocation for valid properties (node pre-looked-up)
                 if (ctx.compiled != null and ctx.isSubschemaValidWithNode(additional, prop_value, additional_node)) continue;
 
-                // Additional properties must validate against this schema
+                // Lazy path allocation — only when validation fails
+                const additional_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "additionalProperties");
                 const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
 
                 const result = ctx.validateSubschema(additional, prop_value, prop_instance_path, additional_schema_path);

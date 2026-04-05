@@ -16,8 +16,6 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    const base_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "dependencies");
-
     var it = deps.iterator();
     while (it.next()) |entry| {
         const prop_name = entry.key_ptr.*;
@@ -49,6 +47,8 @@ pub fn validate(ctx: Context) void {
                 // Fast path: skip path allocation for valid schema dependencies
                 if (ctx.compiled != null and ctx.isSubschemaValid(dep_value, ctx.instance)) continue;
 
+                // Lazy path allocation: only computed when validation fails the fast path
+                const base_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "dependencies");
                 const dep_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, prop_name);
                 const result = ctx.validateSubschema(dep_value, ctx.instance, ctx.instance_path, dep_schema_path);
                 defer result.deinit();
