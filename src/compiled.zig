@@ -2794,21 +2794,32 @@ fn extractPropertyNames(alloc: Allocator, obj: std.json.ObjectMap) []const []con
 /// Convert ECMA-262 regex shortcuts to POSIX ERE equivalents.
 /// \d → [0-9], \D → [^0-9], \w → [a-zA-Z0-9_], \W → [^a-zA-Z0-9_], \s → [ \t\n\r], \S → [^ \t\n\r]
 pub fn convertEcmaToPostfix(alloc: Allocator, pattern: []const u8) ![]const u8 {
-    // Quick check: does the pattern contain any shortcuts?
-    var has_shortcuts = false;
-    for (0..pattern.len -| 1) |i| {
-        if (pattern[i] == '\\') {
+    // Quick check: does the pattern contain any ECMA-specific features?
+    var needs_conversion = false;
+    for (0..pattern.len) |i| {
+        if (i + 1 < pattern.len and pattern[i] == '\\') {
             switch (pattern[i + 1]) {
-                'd', 'D', 'w', 'W', 's', 'S' => { has_shortcuts = true; break; },
+                'd', 'D', 'w', 'W', 's', 'S' => { needs_conversion = true; break; },
                 else => {},
             }
         }
+        // (?:...) non-capturing group — POSIX ERE doesn't support (?:)
+        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and pattern[i + 2] == ':') {
+            needs_conversion = true;
+            break;
+        }
     }
-    if (!has_shortcuts) return pattern;
+    if (!needs_conversion) return pattern;
 
     var buf = std.ArrayList(u8).init(alloc);
     var i: usize = 0;
     while (i < pattern.len) {
+        // Convert (?:...) to (...)
+        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and pattern[i + 2] == ':') {
+            try buf.append('(');
+            i += 3;
+            continue;
+        }
         if (pattern[i] == '\\' and i + 1 < pattern.len) {
             const replacement: ?[]const u8 = switch (pattern[i + 1]) {
                 'd' => "[0-9]",
