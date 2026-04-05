@@ -121,9 +121,14 @@ pub const Context = struct {
                                     return .{ .errors = errs, .allocator = self.allocator };
                                 }
                             }
-                            // Bool-only fast path: skip error collection entirely
+                            // Bool-only fast path: zero-allocation error sentinel
                             if (self.bool_only) {
-                                var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                                var error_buf: [1]jsonschema.ValidationError = undefined;
+                                var errors = std.ArrayList(jsonschema.ValidationError){
+                                    .items = error_buf[0..0],
+                                    .capacity = 1,
+                                    .allocator = self.allocator,
+                                };
                                 const child = Context{
                                     .allocator = self.allocator,
                                     .root_schema = self.root_schema,
@@ -177,7 +182,12 @@ pub const Context = struct {
                     } else if (self.registry == null) {
                         // No registry: use compiled direct path even without node
                         if (self.bool_only) {
-                            var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                            var error_buf: [1]jsonschema.ValidationError = undefined;
+                            var errors = std.ArrayList(jsonschema.ValidationError){
+                                .items = error_buf[0..0],
+                                .capacity = 1,
+                                .allocator = self.allocator,
+                            };
                             const child = Context{
                                 .allocator = self.allocator,
                                 .root_schema = self.root_schema,
@@ -247,9 +257,14 @@ pub const Context = struct {
                     if (node) |n| {
                         if (!n.has_id or self.registry == null) {
                             if (n.isValidFast(instance, compiled)) |result| return result;
-                            // isValid returned null (.generic) — need Context fallback
+                            // isValid returned null — zero-allocation Context fallback
                             if (self.registry == null) {
-                                var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                                var error_buf: [1]jsonschema.ValidationError = undefined;
+                                var errors = std.ArrayList(jsonschema.ValidationError){
+                                    .items = error_buf[0..0],
+                                    .capacity = 1,
+                                    .allocator = self.allocator,
+                                };
                                 const child = Context{
                                     .allocator = self.allocator,
                                     .root_schema = self.root_schema,
@@ -303,7 +318,13 @@ pub const Context = struct {
                         if (!n.has_id or self.registry == null) {
                             if (n.isValidFast(instance, compiled)) |result| return result;
                             if (self.registry == null) {
-                                var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                                // Zero-allocation fallback: stack-based error sentinel
+                                var error_buf: [1]jsonschema.ValidationError = undefined;
+                                var errors = std.ArrayList(jsonschema.ValidationError){
+                                    .items = error_buf[0..0],
+                                    .capacity = 1,
+                                    .allocator = self.allocator,
+                                };
                                 const child = Context{
                                     .allocator = self.allocator,
                                     .root_schema = self.root_schema,
