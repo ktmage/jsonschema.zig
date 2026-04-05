@@ -231,11 +231,7 @@ pub const CompiledValidator = union(enum) {
         pattern_regexes: ?[]const *CompiledRegex = null,
     },
 
-    // additionalProperties: {schema} — pre-linked schema + allowed property names
-    additional_properties_schema: struct {
-        schema: LinkedSchema,
-        property_names: []const []const u8,
-    },
+    additional_properties_schema: *const AdditionalPropsSchemaCompiled,
 
     // Pre-linked if/then/else
     // Heap-allocated to keep union small (was 232 bytes inline)
@@ -253,12 +249,7 @@ pub const CompiledValidator = union(enum) {
     // Compiled propertyNames: linked schema to validate property names against
     property_names_compiled: LinkedSchema,
 
-    // Compiled contains with pre-extracted min/max and pre-linked schema
-    contains_compiled: struct {
-        schema: LinkedSchema,
-        min_contains: usize,
-        max_contains: ?usize,
-    },
+    contains_compiled: *const ContainsCompiled,
 
     // Compiled prefixItems with pre-linked schemas
     prefix_items_compiled: []const LinkedSchema,
@@ -310,6 +301,17 @@ pub const CompiledRegex = struct {
         }
         return false;
     }
+};
+
+pub const AdditionalPropsSchemaCompiled = struct {
+    schema: LinkedSchema,
+    property_names: []const []const u8,
+};
+
+pub const ContainsCompiled = struct {
+    schema: LinkedSchema,
+    min_contains: usize,
+    max_contains: ?usize,
 };
 
 pub const IfThenElseCompiled = struct {
@@ -1635,11 +1637,14 @@ fn compileKeywords(
             .integer => |n| if (n >= 0) @as(?usize, @intCast(n)) else null,
             else => null,
         } else null;
-        validators.append(.{ .contains_compiled = .{
-            .schema = linkSchema(node_map, kv),
-            .min_contains = min_c,
-            .max_contains = max_c,
-        } }) catch {};
+        if (alloc.create(ContainsCompiled)) |cc_val| {
+            cc_val.* = .{
+                .schema = linkSchema(node_map, kv),
+                .min_contains = min_c,
+                .max_contains = max_c,
+            };
+            validators.append(.{ .contains_compiled = cc_val }) catch {};
+        } else |_| {}
     }
 
     // Object
@@ -1696,10 +1701,10 @@ fn compileKeywords(
                 // true means allow everything — no validator needed
             },
             .object => {
-                validators.append(.{ .additional_properties_schema = .{
-                    .schema = linkSchema(node_map, kv),
-                    .property_names = prop_names,
-                } }) catch {};
+                if (alloc.create(AdditionalPropsSchemaCompiled)) |aps| {
+                    aps.* = .{ .schema = linkSchema(node_map, kv), .property_names = prop_names };
+                    validators.append(.{ .additional_properties_schema = aps }) catch {};
+                } else |_| {}
             },
             else => {},
         }
