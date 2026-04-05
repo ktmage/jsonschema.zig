@@ -63,22 +63,9 @@ pub fn isValidCompiled(
         }
     }
 
-    // Fallback: lightweight bool_only validateAll (no ValidationResult overhead)
-    var errors = std.ArrayList(ValidationError).init(allocator);
-    const ctx = Validator.Context{
-        .allocator = allocator,
-        .root_schema = schema,
-        .schema = schema,
-        .instance = instance,
-        .instance_path = "",
-        .schema_path = "",
-        .errors = &errors,
-        .compiled = compiled,
-        .compiled_node = node,
-        .bool_only = true,
-    };
-    Validator.validateAll(ctx);
-    return errors.items.len == 0;
+    // Fallback: use validateCompiled
+    const result = validateCompiled(allocator, compiled, instance);
+    return result.isValid();
 }
 
 /// Validate an instance against a pre-compiled schema.
