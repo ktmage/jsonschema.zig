@@ -2083,6 +2083,69 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
         }
     }
 
+    // Try to merge allOf properties-only branches into the main properties list
+    // This eliminates separate allOf branch evaluations for common patterns like
+    // tsconfig where each allOf branch adds one property definition
+    for (validators.items, 0..) |v, vi| {
+        switch (v) {
+            .all_of_compiled => |schemas| {
+                var merged_props = std.ArrayList(PropertyEntry).init(alloc);
+                // Start with existing properties
+                if (properties_data) |pd| {
+                    for (pd) |p| merged_props.append(p) catch {};
+                }
+                var all_merged = true;
+                for (schemas, 0..) |s, si| {
+                    _ = si;
+                    // Check if this branch is a ref_local → properties-only target
+                    if (s.node) |snode| {
+                        if (snode.ref_overrides and snode.validators.len == 1) {
+                            switch (snode.validators[0]) {
+                                .ref_local => |ls| {
+                                    if (ls.node) |target| {
+                                        // Target must be properties-only (object_fast with no required, no additional)
+                                        for (target.validators) |tv| {
+                                            switch (tv) {
+                                                .object_fast => |of| {
+                                                    if (of.required_mask == 0 and !of.additional_false) {
+                                                        for (of.properties) |p| merged_props.append(p) catch {};
+                                                        continue;
+                                                    }
+                                                },
+                                                .properties_compiled => |pc| {
+                                                    for (pc) |p| merged_props.append(p) catch {};
+                                                    continue;
+                                                },
+                                                else => {},
+                                            }
+                                        }
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                    all_merged = false;
+                    break;
+                }
+                if (all_merged and merged_props.items.len > (properties_data orelse &.{}).len) {
+                    // All allOf branches were properties-only — merge into main properties
+                    properties_data = merged_props.toOwnedSlice() catch properties_data;
+                    if (properties_idx == null) {
+                        // Insert properties at allOf's position
+                        properties_idx = vi;
+                        validators.items[vi] = .{ .properties_compiled = properties_data.? };
+                    } else {
+                        // Update existing properties and remove allOf
+                        validators.items[properties_idx.?] = .{ .properties_compiled = properties_data.? };
+                        _ = validators.orderedRemove(vi);
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
     // Only merge if we have properties and no incompatible validators
     if (properties_data == null or has_incompatible) return;
     // Need properties with > 64 entries? Can't use bitmask
