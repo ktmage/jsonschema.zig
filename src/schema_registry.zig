@@ -652,7 +652,8 @@ fn findAnchorInSchema(schema: std.json.Value, anchor_name: []const u8, base_uri:
 
 fn percentDecode(input: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, input, '%') == null) return input;
-    var buf: [4096]u8 = undefined;
+    // Use threadlocal static buffer to avoid dangling stack pointer
+    const S = struct { threadlocal var buf: [4096]u8 = undefined; };
     var len: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
@@ -660,21 +661,21 @@ fn percentDecode(input: []const u8) []const u8 {
             const hi = hexVal(input[i + 1]);
             const lo = hexVal(input[i + 2]);
             if (hi != null and lo != null) {
-                if (len < buf.len) {
-                    buf[len] = (hi.? << 4) | lo.?;
+                if (len < S.buf.len) {
+                    S.buf[len] = (hi.? << 4) | lo.?;
                     len += 1;
                 }
                 i += 3;
                 continue;
             }
         }
-        if (len < buf.len) {
-            buf[len] = input[i];
+        if (len < S.buf.len) {
+            S.buf[len] = input[i];
             len += 1;
         }
         i += 1;
     }
-    return buf[0..len];
+    return S.buf[0..len];
 }
 
 fn hexVal(c: u8) ?u8 {
@@ -686,23 +687,23 @@ fn hexVal(c: u8) ?u8 {
 
 fn unescapeToken(token: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, token, '~') == null) return token;
-    var buf: [4096]u8 = undefined;
+    const S = struct { threadlocal var buf: [4096]u8 = undefined; };
     var len: usize = 0;
     var i: usize = 0;
     while (i < token.len) {
         if (token[i] == '~' and i + 1 < token.len) {
             if (token[i + 1] == '1') {
-                if (len < buf.len) { buf[len] = '/'; len += 1; }
+                if (len < S.buf.len) { S.buf[len] = '/'; len += 1; }
                 i += 2;
                 continue;
             } else if (token[i + 1] == '0') {
-                if (len < buf.len) { buf[len] = '~'; len += 1; }
+                if (len < S.buf.len) { S.buf[len] = '~'; len += 1; }
                 i += 2;
                 continue;
             }
         }
-        if (len < buf.len) { buf[len] = token[i]; len += 1; }
+        if (len < S.buf.len) { S.buf[len] = token[i]; len += 1; }
         i += 1;
     }
-    return buf[0..len];
+    return S.buf[0..len];
 }
