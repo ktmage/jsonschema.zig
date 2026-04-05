@@ -826,6 +826,18 @@ fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.
         }
     }
     const inst_type_mask = typeMaskForValue(instance);
+    // Fast path for 2-branch oneOf (very common)
+    if (oo.schemas.len == 2) {
+        const c0 = oo.schemas[0].type_mask & inst_type_mask != 0;
+        const c1 = oo.schemas[1].type_mask & inst_type_mask != 0;
+        if (c0 and !c1) return validateLinkedSchema(oo.schemas[0], instance, compiled);
+        if (c1 and !c0) return validateLinkedSchema(oo.schemas[1], instance, compiled);
+        if (!c0 and !c1) return false;
+        // Both compatible — must check both
+        const r0 = validateLinkedSchema(oo.schemas[0], instance, compiled) orelse return null;
+        const r1 = validateLinkedSchema(oo.schemas[1], instance, compiled) orelse return null;
+        return r0 != r1; // exactly one must match
+    }
     var compatible_count: usize = 0;
     var last_compatible_idx: usize = 0;
     for (oo.schemas, 0..) |s, idx| {
@@ -922,6 +934,15 @@ fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Valu
                         if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
                         continue;
                     }
+                    // Direct dispatch: skip validateLinkedSchema overhead
+                    if (n.validators.len == 1 and !n.ref_overrides) {
+                        const r = n.validators[0].isValid_fn(n.validators[0].data, val, compiled) orelse return null;
+                        if (!r) return false;
+                        continue;
+                    }
+                    const r = n.isValidFast(val, compiled) orelse return null;
+                    if (!r) return false;
+                    continue;
                 }
                 const result = validateLinkedSchema(ls, val, compiled) orelse return null;
                 if (!result) return false;
