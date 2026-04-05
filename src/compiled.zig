@@ -414,6 +414,29 @@ pub const CompiledNode = struct {
     /// Used by unevaluatedProperties ceiling check to match property names.
     unevaluated_pattern_regexes: ?[]*CompiledRegex = null,
 
+    /// Extended boolean validation. Returns null only for .generic validators.
+    /// Handles more cases than isValidFast (ref_overrides, pattern without alloc).
+    pub fn isValid(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+        if (self.always_valid) return true;
+        if (self.simple_type != .none) return Validator.matchesSimpleType(instance, self.simple_type);
+        if (self.ref_overrides) {
+            for (self.validators) |v| {
+                switch (v) {
+                    .ref_local => |ls| {
+                        if (ls.node) |rn| return rn.isValid(instance, compiled);
+                    },
+                    else => {},
+                }
+            }
+            return null;
+        }
+        for (self.validators) |v| {
+            const result = isValidatorValid(v, instance, compiled) orelse return null;
+            if (!result) return false;
+        }
+        return true;
+    }
+
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
     pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
         if (self.always_valid) return true;
@@ -820,14 +843,18 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 else => return true,
             };
             if (!cr.valid) return true;
-            // Null-terminate for C regex
-            // Note: in isValidFast we can't allocate, so we check if string is already null-terminated
-            // by checking if the byte after the slice is 0 (risky but std.json strings are null-terminated)
-            const ptr: [*]const u8 = instance_str.ptr;
-            if (instance_str.len > 0 and ptr[instance_str.len] == 0) {
-                return c.regexec(&cr.regex, ptr, 0, null, 0) == 0;
+            if (cr.simple_prefix) |prefix| {
+                return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
             }
-            return null; // can't null-terminate without allocating
+            if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
+            // Use stack buffer for null-termination (handles strings up to 511 bytes)
+            if (instance_str.len < 512) {
+                var buf: [512]u8 = undefined;
+                @memcpy(buf[0..instance_str.len], instance_str);
+                buf[instance_str.len] = 0;
+                return c.regexec(&cr.regex, &buf, 0, null, 0) == 0;
+            }
+            return null; // too long for stack buffer
         },
         .dependent_required_compiled => |deps| {
             const obj = switch (instance) {
@@ -1191,7 +1218,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
 fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     if (ls.node) |node| {
         if (node.always_valid) return true;
-        if (node.needs_uri_resolution) return null;
+        if (node.has_id) return null;
         return node.isValidFast(instance, compiled);
     }
     return switch (ls.value) {

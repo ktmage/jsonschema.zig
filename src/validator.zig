@@ -194,29 +194,27 @@ pub const Context = struct {
                 .object => {
                     const node = compiled.getNode(sub_schema);
                     if (node) |n| {
-                        const can_skip = !n.needs_uri_resolution or
-                            (!n.has_id and self.registry == null);
-                        if (can_skip) {
-                            if (n.isValidFast(instance, compiled)) |result| return result;
+                        if (!n.has_id or self.registry == null) {
+                            if (n.isValid(instance, compiled)) |result| return result;
+                            // isValid returned null (.generic) — need Context fallback
+                            if (self.registry == null) {
+                                var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                                const child = Context{
+                                    .allocator = self.allocator,
+                                    .root_schema = self.root_schema,
+                                    .schema = sub_schema,
+                                    .instance = instance,
+                                    .instance_path = "",
+                                    .schema_path = "",
+                                    .errors = &errors,
+                                    .compiled = self.compiled,
+                                    .compiled_node = n,
+                                    .bool_only = true,
+                                };
+                                validateAll(child);
+                                return errors.items.len == 0;
+                            }
                         }
-                    }
-                    // Compiled direct path: skip validateFull overhead
-                    if (self.registry == null) {
-                        var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
-                        const child = Context{
-                            .allocator = self.allocator,
-                            .root_schema = self.root_schema,
-                            .schema = sub_schema,
-                            .instance = instance,
-                            .instance_path = "",
-                            .schema_path = "",
-                            .errors = &errors,
-                            .compiled = self.compiled,
-                            .compiled_node = node,
-                            .bool_only = true,
-                        };
-                        validateAll(child);
-                        return errors.items.len == 0;
                     }
                 },
                 else => return true,
@@ -251,29 +249,26 @@ pub const Context = struct {
                 .object => {
                     const node = pre_node orelse compiled.getNode(sub_schema);
                     if (node) |n| {
-                        const can_skip = !n.needs_uri_resolution or
-                            (!n.has_id and self.registry == null);
-                        if (can_skip) {
-                            if (n.isValidFast(instance, compiled)) |result| return result;
+                        if (!n.has_id or self.registry == null) {
+                            if (n.isValid(instance, compiled)) |result| return result;
+                            if (self.registry == null) {
+                                var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                                const child = Context{
+                                    .allocator = self.allocator,
+                                    .root_schema = self.root_schema,
+                                    .schema = sub_schema,
+                                    .instance = instance,
+                                    .instance_path = "",
+                                    .schema_path = "",
+                                    .errors = &errors,
+                                    .compiled = self.compiled,
+                                    .compiled_node = n,
+                                    .bool_only = true,
+                                };
+                                validateAll(child);
+                                return errors.items.len == 0;
+                            }
                         }
-                    }
-                    // Compiled direct path
-                    if (self.registry == null) {
-                        var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
-                        const child = Context{
-                            .allocator = self.allocator,
-                            .root_schema = self.root_schema,
-                            .schema = sub_schema,
-                            .instance = instance,
-                            .instance_path = "",
-                            .schema_path = "",
-                            .errors = &errors,
-                            .compiled = self.compiled,
-                            .compiled_node = node,
-                            .bool_only = true,
-                        };
-                        validateAll(child);
-                        return errors.items.len == 0;
                     }
                 },
                 else => return true,
