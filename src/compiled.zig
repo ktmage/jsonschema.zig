@@ -305,9 +305,18 @@ pub const CompiledRegex = struct {
         if (self.is_identifier) return matchesIdentifierPattern(str);
         // Regex path: need null-terminated string
         if (!self.valid) return false;
-        const alloc = allocator orelse return false;
-        const str_z = alloc.dupeZ(u8, str) catch return false;
-        return c.regexec(&self.regex, str_z.ptr, 0, null, 0) == 0;
+        if (allocator) |alloc| {
+            const str_z = alloc.dupeZ(u8, str) catch return false;
+            return c.regexec(&self.regex, str_z.ptr, 0, null, 0) == 0;
+        }
+        // No allocator: use stack buffer for short strings
+        if (str.len < 512) {
+            var buf: [512]u8 = undefined;
+            @memcpy(buf[0..str.len], str);
+            buf[str.len] = 0;
+            return c.regexec(&self.regex, &buf, 0, null, 0) == 0;
+        }
+        return false;
     }
 };
 
@@ -953,14 +962,12 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 }
                 if (!found and up.pattern_regexes != null) {
                     for (up.pattern_regexes.?) |cr| {
-                        if (cr.simple_prefix) |prefix| {
-                            if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
-                                found = true;
-                                break;
-                            }
+                        if (cr.matches(key, null)) {
+                            found = true;
+                            break;
                         }
-                        // Can't use full regex without allocation — bail
-                        if (cr.simple_prefix == null) return null;
+                        // If matches returned false and we can't check further patterns
+                        if (cr.simple_prefix == null and !cr.is_identifier and !cr.valid) return null;
                     }
                 }
                 if (!found) return null; // Can't determine — need full validation
