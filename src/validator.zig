@@ -755,14 +755,15 @@ pub fn validateAll(ctx: Context) void {
                                 const can_skip_o = !snode.needs_uri_resolution or
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip_o) {
-                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                    // Use isValid (handles ref_overrides without Context)
+                                    if (snode.isValid(ctx.instance, compiled)) |result| {
                                         if (result) {
                                             match_count += 1;
                                             if (match_count > 1) break;
                                         }
                                         continue;
                                     }
-                                    // isValidFast null — use compiled boolean path
+                                    // isValid null (.generic) — use compiled boolean path
                                     if (ctx.registry == null) {
                                         if (ctx.isSubschemaValidWithNode(s.value, ctx.instance, snode)) {
                                             match_count += 1;
