@@ -21,9 +21,11 @@ pub const FastRegex = struct {
         /// If this op matches exactly one character, store it for optimization
         literal_char: u8 = 0,
         is_literal: bool = false,
+        /// True for . (dot) and [^...] (negated class) — matches non-ASCII bytes
+        match_non_ascii: bool = false,
 
         inline fn matchChar(self: Op, ch: u8) bool {
-            if (ch >= 128) return false;
+            if (ch >= 128) return self.match_non_ascii;
             // Branchless: use ch>>6 to select word, ch&63 for bit position
             const words = [2]u64{ self.low, self.high };
             return (words[ch >> 6] >> @as(u6, @intCast(ch & 63))) & 1 != 0;
@@ -98,9 +100,10 @@ pub const FastRegex = struct {
                 i += 1;
             } else if (ch == '(') {
                 // Reject lookahead/lookbehind
+                var is_non_capturing = false;
                 if (i + 1 < inner.len and inner[i + 1] == '?') {
                     if (i + 2 < inner.len and (inner[i + 2] == '=' or inner[i + 2] == '!' or inner[i + 2] == '<')) return null;
-                    // (?:...) non-capturing group is OK — skip ?: prefix
+                    if (i + 2 < inner.len and inner[i + 2] == ':') is_non_capturing = true;
                 }
                 var depth: usize = 1;
                 var j = i + 1;
@@ -109,7 +112,9 @@ pub const FastRegex = struct {
                     else if (inner[j] == ')') depth -= 1;
                 }
                 if (depth != 0) return null;
-                const group_content = inner[i + 1 .. j - 1];
+                // Skip ?: prefix for non-capturing groups
+                const content_start = if (is_non_capturing) i + 3 else i + 1;
+                const group_content = inner[content_start .. j - 1];
                 // Check for alternation — not supported
                 for (group_content) |gc| { if (gc == '|') return null; }
                 // Recursively compile group content
@@ -123,14 +128,8 @@ pub const FastRegex = struct {
                 // Parse quantifier on the group
                 if (i < inner.len) {
                     switch (inner[i]) {
-                        '?' => {
-                            if (sub_regex.ops.len > 0) {
-                                const last_idx = ops.items.len - sub_regex.ops.len;
-                                for (ops.items[last_idx..]) |*sop| sop.min = 0;
-                            }
-                            i += 1;
-                        },
-                        '*', '+', '{' => return null, // group repetition not supported
+                        // Group quantifiers require atomic group handling — fall back to POSIX
+                        '?', '*', '+', '{' => return null,
                         else => {},
                     }
                 }
@@ -171,11 +170,9 @@ pub const FastRegex = struct {
                 },
                 .char_class => |cc| {
                     if (cc.negated) {
-                        // Set all ASCII bits, then clear the specified ones
+                        // Per ECMA-262: [^x] matches any char except x (including \n)
                         op_low = ~cc.low;
                         op_high = ~cc.high;
-                        // Clear newline (0x0a) for compatibility
-                        op_low &= ~(@as(u64, 1) << 10);
                     } else {
                         op_low = cc.low;
                         op_high = cc.high;
@@ -189,7 +186,8 @@ pub const FastRegex = struct {
             }
             const is_lit = (kind == .literal);
             const lit_ch: u8 = if (kind == .literal) kind.literal else 0;
-            ops.append(.{ .low = op_low, .high = op_high, .min = min, .max = max, .literal_char = lit_ch, .is_literal = is_lit }) catch return null;
+            const non_ascii = (kind == .dot) or (kind == .char_class and kind.char_class.negated);
+            ops.append(.{ .low = op_low, .high = op_high, .min = min, .max = max, .literal_char = lit_ch, .is_literal = is_lit, .match_non_ascii = non_ascii }) catch return null;
         }
 
         const final_ops = ops.toOwnedSlice() catch return null;
@@ -424,6 +422,8 @@ pub const FastRegex = struct {
         cc.low |= @as(u64, 1) << ' ';
         cc.low |= @as(u64, 1) << '\t';
         cc.low |= @as(u64, 1) << '\n';
+        cc.low |= @as(u64, 1) << 0x0b; // \v vertical tab
+        cc.low |= @as(u64, 1) << 0x0c; // \f form feed
         cc.low |= @as(u64, 1) << '\r';
         return cc;
     }
