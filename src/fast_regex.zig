@@ -97,7 +97,11 @@ pub const FastRegex = struct {
                 kind = .dot;
                 i += 1;
             } else if (ch == '(') {
-                // Find matching ')' — only support non-alternation groups
+                // Reject lookahead/lookbehind
+                if (i + 1 < inner.len and inner[i + 1] == '?') {
+                    if (i + 2 < inner.len and (inner[i + 2] == '=' or inner[i + 2] == '!' or inner[i + 2] == '<')) return null;
+                    // (?:...) non-capturing group is OK — skip ?: prefix
+                }
                 var depth: usize = 1;
                 var j = i + 1;
                 while (j < inner.len and depth > 0) : (j += 1) {
@@ -120,14 +124,13 @@ pub const FastRegex = struct {
                 if (i < inner.len) {
                     switch (inner[i]) {
                         '?' => {
-                            // Make all sub-ops optional (min=0)
-                            // Simple case: set first op min=0 (only works for single-op groups)
                             if (sub_regex.ops.len > 0) {
                                 const last_idx = ops.items.len - sub_regex.ops.len;
                                 for (ops.items[last_idx..]) |*sop| sop.min = 0;
                             }
                             i += 1;
                         },
+                        '*', '+', '{' => return null, // group repetition not supported
                         else => {},
                     }
                 }
@@ -445,7 +448,7 @@ pub const FastRegex = struct {
                     's' => { const s = spaceClass(); cc.low |= s.low; cc.high |= s.high; i += 2; },
                     else => |esc| { setBit(&cc, esc); i += 2; },
                 }
-            } else if (i + 2 < pattern.len and pattern[i + 1] == '-' and pattern[i + 2] != ']') {
+            } else if (i + 2 < pattern.len and pattern[i + 1] == '-' and pattern[i + 2] != ']' and pattern[i + 2] != '\\') {
                 const start = pattern[i];
                 const end = pattern[i + 2];
                 if (start <= end) {
