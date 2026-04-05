@@ -22,10 +22,11 @@ pub const FastRegex = struct {
         literal_char: u8 = 0,
         is_literal: bool = false,
 
-        fn matchChar(self: Op, ch: u8) bool {
+        inline fn matchChar(self: Op, ch: u8) bool {
             if (ch >= 128) return false;
-            if (ch < 64) return (self.low >> @as(u6, @intCast(ch))) & 1 != 0;
-            return (self.high >> @as(u6, @intCast(ch - 64))) & 1 != 0;
+            // Branchless: use ch>>6 to select word, ch&63 for bit position
+            const words = [2]u64{ self.low, self.high };
+            return (words[ch >> 6] >> @as(u6, @intCast(ch & 63))) & 1 != 0;
         }
     };
 
