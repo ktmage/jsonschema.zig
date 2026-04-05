@@ -57,6 +57,9 @@ pub const Context = struct {
     evaluated_props: ?*std.StringHashMap(void) = null,
     /// Current keyword value, set by compiled dispatch to avoid re-lookup.
     current_keyword_value: ?std.json.Value = null,
+    /// When true, validateAll returns on first error without collecting details.
+    /// Used by isSubschemaValid compiled direct path for zero-allocation boolean check.
+    bool_only: bool = false,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -210,6 +213,7 @@ pub const Context = struct {
                             .errors = &errors,
                             .compiled = self.compiled,
                             .compiled_node = node,
+                            .bool_only = true,
                         };
                         validateAll(child);
                         return errors.items.len == 0;
@@ -266,6 +270,7 @@ pub const Context = struct {
                             .errors = &errors,
                             .compiled = self.compiled,
                             .compiled_node = node,
+                            .bool_only = true,
                         };
                         validateAll(child);
                         return errors.items.len == 0;
@@ -292,6 +297,16 @@ pub const Context = struct {
 
     /// Add a validation error to the error list.
     pub fn addError(self: Context, keyword: []const u8, message: []const u8) void {
+        if (self.bool_only) {
+            // Just mark that there's an error, skip path construction
+            self.errors.append(.{
+                .instance_path = "",
+                .schema_path = "",
+                .keyword = keyword,
+                .message = "",
+            }) catch return;
+            return;
+        }
         const schema_p = JsonPointer.appendProperty(self.allocator, self.schema_path, keyword);
         self.errors.append(.{
             .instance_path = self.allocator.dupe(u8, self.instance_path) catch return,
@@ -442,6 +457,8 @@ pub fn validateAll(ctx: Context) void {
                 return;
             }
             for (n.validators) |v| {
+                // bool_only early exit: stop on first error
+                if (ctx.bool_only and ctx.errors.items.len > 0) return;
                 switch (v) {
                     .type_single => |st| {
                         if (!matchesSimpleType(ctx.instance, st)) {
