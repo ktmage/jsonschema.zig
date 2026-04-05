@@ -205,10 +205,7 @@ pub const CompiledValidator = union(enum) {
     },
     any_of_compiled: []const LinkedSchema,
     not_compiled: LinkedSchema,
-    items_compiled: struct {
-        schema: LinkedSchema,
-        prefix_count: usize,
-    },
+    items_compiled: *const ItemsCompiled,
 
     // Combined object validator: type + required + properties + additionalProperties: false
     // Handles the common pattern in a single pass over instance keys/values,
@@ -262,11 +259,18 @@ pub const CompiledValidator = union(enum) {
 
     // Complex keywords — keep as generic with function pointer fallback
     // These need full schema context (pattern matching, URI resolution, etc.)
-    generic: struct {
-        func: Validator.KeywordValidator,
-        keyword_value: std.json.Value,
-        keyword_name: []const u8,
-    },
+    generic: *const GenericValidator,
+};
+
+pub const ItemsCompiled = struct {
+    schema: LinkedSchema,
+    prefix_count: usize,
+};
+
+pub const GenericValidator = struct {
+    func: Validator.KeywordValidator,
+    keyword_value: std.json.Value,
+    keyword_name: []const u8,
 };
 
 /// A pre-compiled POSIX regex stored in the arena.
@@ -1553,11 +1557,7 @@ fn compileKeywords(
         if (compileRegex(alloc, kv, regex_list)) |cr| {
             validators.append(.{ .pattern_compiled = cr }) catch {};
         } else {
-            validators.append(.{ .generic = .{
-                .func = @import("keywords/pattern.zig").validate,
-                .keyword_value = kv,
-                .keyword_name = "pattern",
-            } }) catch {};
+            validators.append(makeGeneric(alloc, @import("keywords/pattern.zig").validate, kv, "pattern")) catch {};
         }
     }
 
@@ -1573,29 +1573,24 @@ fn compileKeywords(
     if (obj.get("items")) |kv| {
         switch (kv) {
             .object, .bool => {
-                validators.append(.{ .items_compiled = .{
-                    .schema = linkSchema(node_map, kv),
-                    .prefix_count = if (obj.get("prefixItems")) |pi| switch (pi) {
-                        .array => |a| a.items.len,
-                        else => 0,
-                    } else 0,
-                } }) catch {};
+                if (alloc.create(ItemsCompiled)) |ic_val| {
+                    ic_val.* = .{
+                        .schema = linkSchema(node_map, kv),
+                        .prefix_count = if (obj.get("prefixItems")) |pi| switch (pi) {
+                            .array => |a| a.items.len,
+                            else => 0,
+                        } else 0,
+                    };
+                    validators.append(.{ .items_compiled = ic_val }) catch {};
+                } else |_| {}
             },
             else => {
-                validators.append(.{ .generic = .{
-                    .func = @import("keywords/items.zig").validate,
-                    .keyword_value = kv,
-                    .keyword_name = "items",
-                } }) catch {};
+                validators.append(makeGeneric(alloc, @import("keywords/items.zig").validate, kv, "items")) catch {};
             },
         }
     }
     if (obj.get("additionalItems")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/additional_items.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "additionalItems",
-        } }) catch {};
+        validators.append(makeGeneric(alloc, @import("keywords/additional_items.zig").validate, kv, "additionalItems")) catch {};
     }
     if (obj.get("minItems")) |kv| {
         if (!validation_vocab_disabled) {
@@ -1617,11 +1612,7 @@ fn compileKeywords(
             switch (kv) {
                 .bool => |b| {
                     if (b) {
-                        validators.append(.{ .generic = .{
-                            .func = @import("keywords/unique_items.zig").validate,
-                            .keyword_value = kv,
-                            .keyword_name = "uniqueItems",
-                        } }) catch {};
+                        validators.append(makeGeneric(alloc, @import("keywords/unique_items.zig").validate, kv, "uniqueItems")) catch {};
                     }
                 },
                 else => {},
@@ -1714,11 +1705,7 @@ fn compileKeywords(
         if (compilePatternProperties(alloc, kv, node_map, regex_list)) |compiled_pp| {
             validators.append(.{ .pattern_properties_compiled = compiled_pp }) catch {};
         } else {
-            validators.append(.{ .generic = .{
-                .func = @import("keywords/pattern_properties.zig").validate,
-                .keyword_value = kv,
-                .keyword_name = "patternProperties",
-            } }) catch {};
+            validators.append(makeGeneric(alloc, @import("keywords/pattern_properties.zig").validate, kv, "patternProperties")) catch {};
         }
     }
     if (obj.get("minProperties")) |kv| {
@@ -1739,11 +1726,7 @@ fn compileKeywords(
         validators.append(.{ .property_names_compiled = linkSchema(node_map, kv) }) catch {};
     }
     if (obj.get("dependencies")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/dependencies.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "dependencies",
-        } }) catch {};
+        validators.append(makeGeneric(alloc, @import("keywords/dependencies.zig").validate, kv, "dependencies")) catch {};
         // Also compile array-form dependencies as dependent_required_compiled
         // and schema-form as dependent_schemas_compiled
         if (kv == .object) {
@@ -1884,26 +1867,14 @@ fn compileKeywords(
             if (resolved) |r| {
                 validators.append(.{ .ref_local = linkSchema(node_map, r) }) catch {};
             } else {
-                validators.append(.{ .generic = .{
-                    .func = @import("keywords/ref.zig").validate,
-                    .keyword_value = kv,
-                    .keyword_name = "$ref",
-                } }) catch {};
+                validators.append(makeGeneric(alloc, @import("keywords/ref.zig").validate, kv, "$ref")) catch {};
             }
         } else {
-            validators.append(.{ .generic = .{
-                .func = @import("keywords/ref.zig").validate,
-                .keyword_value = kv,
-                .keyword_name = "$ref",
-            } }) catch {};
+            validators.append(makeGeneric(alloc, @import("keywords/ref.zig").validate, kv, "$ref")) catch {};
         }
     }
     if (obj.get("$dynamicRef")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/dynamic_ref.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "$dynamicRef",
-        } }) catch {};
+        validators.append(makeGeneric(alloc, @import("keywords/dynamic_ref.zig").validate, kv, "$dynamicRef")) catch {};
     }
 
     // Conditional
@@ -1922,11 +1893,7 @@ fn compileKeywords(
 
     // Unevaluated (must be last — depends on other keywords' evaluations)
     if (obj.get("unevaluatedProperties")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/unevaluated_properties.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "unevaluatedProperties",
-        } }) catch {};
+        validators.append(makeGeneric(alloc, @import("keywords/unevaluated_properties.zig").validate, kv, "unevaluatedProperties")) catch {};
     }
     if (obj.get("unevaluatedItems")) |kv| {
         // If items (single schema, not array) exists, it evaluates ALL items.
@@ -1939,11 +1906,7 @@ fn compileKeywords(
         if (has_items_single and is_false) {
             // Skip — items covers all elements, unevaluatedItems: false is no-op
         } else {
-            validators.append(.{ .generic = .{
-                .func = @import("keywords/unevaluated_items.zig").validate,
-                .keyword_value = kv,
-                .keyword_name = "unevaluatedItems",
-            } }) catch {};
+            validators.append(makeGeneric(alloc, @import("keywords/unevaluated_items.zig").validate, kv, "unevaluatedItems")) catch {};
         }
     }
 }
@@ -2155,6 +2118,15 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
 
     // Insert the merged validator at the front
     validators.insert(0, merged) catch {};
+}
+
+fn makeGeneric(alloc: Allocator, func: Validator.KeywordValidator, kv: std.json.Value, name: []const u8) CompiledValidator {
+    if (alloc.create(GenericValidator)) |g| {
+        g.* = .{ .func = func, .keyword_value = kv, .keyword_name = name };
+        return .{ .generic = g };
+    } else |_| {
+        return .{ .generic = undefined };
+    }
 }
 
 /// Extract property names from a schema's "properties" keyword.
