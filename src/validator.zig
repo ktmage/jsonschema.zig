@@ -298,13 +298,10 @@ pub const Context = struct {
     /// Add a validation error to the error list.
     pub fn addError(self: Context, keyword: []const u8, message: []const u8) void {
         if (self.bool_only) {
-            // Just mark that there's an error, skip path construction
-            self.errors.append(.{
-                .instance_path = "",
-                .schema_path = "",
-                .keyword = keyword,
-                .message = "",
-            }) catch return;
+            // Just mark error existence, skip path construction, don't grow ArrayList
+            if (self.errors.items.len == 0) {
+                self.errors.append(.{ .instance_path = "", .schema_path = "", .keyword = keyword, .message = "" }) catch return;
+            }
             return;
         }
         const schema_p = JsonPointer.appendProperty(self.allocator, self.schema_path, keyword);
@@ -755,7 +752,6 @@ pub fn validateAll(ctx: Context) void {
                         }
                         // Non-discriminator: per-branch evaluation with type mask
                         const inst_mask = compiled_mod.typeMaskForValue(ctx.instance);
-                        var fast_ok = true;
                         var match_count: usize = 0;
                         for (oo.schemas) |s| {
                             if (s.type_mask & inst_mask == 0) continue;
@@ -780,10 +776,14 @@ pub fn validateAll(ctx: Context) void {
                                     }
                                 }
                             }
-                            fast_ok = false;
-                            break;
+                            // No node or can't skip — try isSubschemaValid
+                            if (ctx.isSubschemaValid(s.value, ctx.instance)) {
+                                match_count += 1;
+                                if (match_count > 1) break;
+                            }
+                            continue;
                         }
-                        if (fast_ok) {
+                        { // oneOf result handling
                             if (match_count != 1) {
                                 if (match_count == 0) {
                                     ctx.addError("oneOf", "Instance does not match any schema in oneOf");
@@ -791,11 +791,6 @@ pub fn validateAll(ctx: Context) void {
                                     ctx.addError("oneOf", "Instance matches more than one schema in oneOf");
                                 }
                             }
-                        } else {
-                            var child = ctx;
-                            child.current_keyword_value = null;
-                            child.compiled_node = null;
-                            @import("keywords/one_of.zig").validate(child);
                         }
                     },
                     .any_of_compiled => |schemas| {
