@@ -293,9 +293,9 @@ pub const Context = struct {
     /// Add a validation error to the error list.
     pub fn addError(self: Context, keyword: []const u8, message: []const u8) void {
         if (self.bool_only) {
-            // Just mark error existence, skip path construction, don't grow ArrayList
+            // Mark error existence WITHOUT allocation — set items.len to 1 via sentinel
             if (self.errors.items.len == 0) {
-                self.errors.append(.{ .instance_path = "", .schema_path = "", .keyword = keyword, .message = "" }) catch return;
+                self.errors.items.len = 1; // sentinel: non-zero signals error exists
             }
             return;
         }
