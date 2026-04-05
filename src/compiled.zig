@@ -223,8 +223,11 @@ pub const CompiledValidator = union(enum) {
     // Pre-linked local $ref (fragment-only, no registry needed)
     ref_local: LinkedSchema,
 
-    // additionalProperties: false — pre-extracted allowed property names
-    additional_properties_false: []const []const u8,
+    // additionalProperties: false — pre-extracted allowed property names + optional pattern regexes
+    additional_properties_false: struct {
+        property_names: []const []const u8,
+        pattern_regexes: ?[]const *CompiledRegex = null,
+    },
 
     // additionalProperties: {schema} — pre-linked schema + allowed property names
     additional_properties_schema: struct {
@@ -652,19 +655,46 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
         .ref_local => |ls| {
             return validateLinkedSchema(ls, instance, compiled);
         },
-        .additional_properties_false => |property_names| {
+        .additional_properties_false => |ap| {
             const obj = switch (instance) {
                 .object => |o| o,
                 else => return true,
             };
-            // Fast check: count instance properties covered by allowed names
-            // Uses hashmap lookup on the instance (O(1) per name) instead of
-            // iterating all instance properties with linear name search (O(M*N))
             var covered: usize = 0;
-            for (property_names) |name| {
+            for (ap.property_names) |name| {
                 if (obj.get(name) != null) covered += 1;
             }
-            return obj.count() <= covered;
+            if (obj.count() <= covered) return true;
+            // Some uncovered — check against pattern regexes
+            if (ap.pattern_regexes) |patterns| {
+                const keys = obj.keys();
+                for (keys) |key| {
+                    var found = false;
+                    for (ap.property_names) |name| {
+                        if (key.len == name.len and std.mem.eql(u8, key, name)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        var pattern_match = false;
+                        for (patterns) |cr| {
+                            // Only use simple_prefix in isValidFast (no allocator)
+                            if (cr.simple_prefix) |prefix| {
+                                if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
+                                    pattern_match = true;
+                                    break;
+                                }
+                            } else {
+                                return null; // Can't check regex without allocator
+                            }
+                        }
+                        if (!pattern_match) return false;
+                    }
+                }
+                return true;
+            }
+            return false;
         },
         .additional_properties_schema => |ap| {
             const obj = switch (instance) {
@@ -1055,7 +1085,62 @@ fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) Li
         .object => |o| node_map.get(@intFromPtr(o.keys().ptr)),
         else => null,
     };
-    return .{ .node = node, .value = value, .type_mask = typeMaskForSchema(value) };
+    var mask = typeMaskForSchema(value);
+    // Infer tighter type mask from compiled node (helps $ref branches)
+    if (mask == 0xFF) {
+        if (node) |n| {
+            if (n.simple_type != .none) {
+                mask = typeMaskForString(switch (n.simple_type) {
+                    .null => "null",
+                    .boolean => "boolean",
+                    .integer => "integer",
+                    .number => "number",
+                    .string => "string",
+                    .array => "array",
+                    .object => "object",
+                    .none => "",
+                });
+            } else {
+                // Check validators for type constraints
+                for (n.validators) |v| {
+                    switch (v) {
+                        .type_single => |st| {
+                            mask = typeMaskForString(switch (st) {
+                                .null => "null",
+                                .boolean => "boolean",
+                                .integer => "integer",
+                                .number => "number",
+                                .string => "string",
+                                .array => "array",
+                                .object => "object",
+                                .none => "",
+                            });
+                            break;
+                        },
+                        .type_multi => |types| {
+                            mask = 0;
+                            for (types) |st| {
+                                mask |= typeMaskForString(switch (st) {
+                                    .null => "null",
+                                    .boolean => "boolean",
+                                    .integer => "integer",
+                                    .number => "number",
+                                    .string => "string",
+                                    .array => "array",
+                                    .object => "object",
+                                    .none => "",
+                                });
+                            }
+                            break;
+                        },
+                        .object_fast => { mask = 64; break; },
+                        else => {},
+                    }
+                }
+            }
+        }
+    }
+    return .{ .node = node, .value = value, .type_mask = mask };
 }
 
 fn linkSchemaArray(alloc: Allocator, node_map: *const CompiledSchema.NodeMap, items: []const std.json.Value) []const LinkedSchema {
@@ -1390,32 +1475,41 @@ fn compileKeywords(
         }
     }
     if (obj.get("additionalProperties")) |kv| {
-        const has_pattern_props = obj.get("patternProperties") != null;
-        if (!has_pattern_props) {
-            // No patternProperties — can use fast compiled variants
-            const prop_names = extractPropertyNames(alloc, obj);
-            switch (kv) {
-                .bool => |b| {
-                    if (!b) {
-                        validators.append(.{ .additional_properties_false = prop_names }) catch {};
+        const prop_names = extractPropertyNames(alloc, obj);
+        // Collect pattern regexes from patternProperties (if any) for additionalProperties check
+        const ap_patterns: ?[]const *CompiledRegex = blk: {
+            if (obj.get("patternProperties")) |pp_val| {
+                if (pp_val == .object) {
+                    var pp_regs = std.ArrayList(*CompiledRegex).init(alloc);
+                    var pp_it = pp_val.object.iterator();
+                    while (pp_it.next()) |pp_entry| {
+                        if (compileRegex(alloc, .{ .string = pp_entry.key_ptr.* }, regex_list)) |cr| {
+                            pp_regs.append(cr) catch {};
+                        }
                     }
-                    // true means allow everything — no validator needed
-                },
-                .object => {
-                    validators.append(.{ .additional_properties_schema = .{
-                        .schema = linkSchema(node_map, kv),
-                        .property_names = prop_names,
-                    } }) catch {};
-                },
-                else => {},
+                    if (pp_regs.items.len > 0) break :blk pp_regs.toOwnedSlice() catch null;
+                }
             }
-        } else {
-            // Has patternProperties — use generic fallback
-            validators.append(.{ .generic = .{
-                .func = @import("keywords/additional_properties.zig").validate,
-                .keyword_value = kv,
-                .keyword_name = "additionalProperties",
-            } }) catch {};
+            break :blk null;
+        };
+
+        switch (kv) {
+            .bool => |b| {
+                if (!b) {
+                    validators.append(.{ .additional_properties_false = .{
+                        .property_names = prop_names,
+                        .pattern_regexes = ap_patterns,
+                    } }) catch {};
+                }
+                // true means allow everything — no validator needed
+            },
+            .object => {
+                validators.append(.{ .additional_properties_schema = .{
+                    .schema = linkSchema(node_map, kv),
+                    .property_names = prop_names,
+                } }) catch {};
+            },
+            else => {},
         }
     }
     if (obj.get("patternProperties")) |kv| {
@@ -1704,9 +1798,12 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
                 properties_data = p;
                 properties_idx = i;
             },
-            .additional_properties_false => {
-                additional_false = true;
-                additional_idx = i;
+            .additional_properties_false => |apf| {
+                // Only merge if no pattern regexes (object_fast can't handle patterns)
+                if (apf.pattern_regexes == null) {
+                    additional_false = true;
+                    additional_idx = i;
+                }
             },
             // These overlap with object_fast logic — can't merge
             .additional_properties_schema, .object_fast => {

@@ -920,29 +920,38 @@ pub fn validateAll(ctx: Context) void {
                         child.compiled_node = null;
                         @import("keywords/ref.zig").validate(child);
                     },
-                    .additional_properties_false => |property_names| {
+                    .additional_properties_false => |ap| {
                         const inst_obj = switch (ctx.instance) {
                             .object => |o| o,
                             else => continue,
                         };
                         // Fast check: count covered properties
-                        var covered: usize = 0;
-                        for (property_names) |name| {
-                            if (inst_obj.get(name) != null) covered += 1;
+                        var name_covered: usize = 0;
+                        for (ap.property_names) |name| {
+                            if (inst_obj.get(name) != null) name_covered += 1;
                         }
-                        if (inst_obj.count() <= covered) continue;
-                        // Has additional properties — find and report them
-                        var it = inst_obj.iterator();
-                        while (it.next()) |entry| {
-                            const prop_name = entry.key_ptr.*;
+                        if (inst_obj.count() <= name_covered) continue;
+                        // Check uncovered properties against pattern regexes
+                        var has_violation = false;
+                        const keys = inst_obj.keys();
+                        for (keys) |prop_name| {
                             var found = false;
-                            for (property_names) |name| {
-                                if (std.mem.eql(u8, prop_name, name)) {
+                            for (ap.property_names) |name| {
+                                if (prop_name.len == name.len and std.mem.eql(u8, prop_name, name)) {
                                     found = true;
                                     break;
                                 }
                             }
+                            if (!found and ap.pattern_regexes != null) {
+                                for (ap.pattern_regexes.?) |cr| {
+                                    if (cr.matches(prop_name, ctx.allocator)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
                             if (!found) {
+                                has_violation = true;
                                 const msg = std.fmt.allocPrint(
                                     ctx.allocator,
                                     "Additional property '{s}' is not allowed",
