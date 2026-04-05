@@ -140,6 +140,49 @@ for (result.errors) |err| {
 }
 ```
 
+## Performance
+
+Benchmarked against major JSON Schema validators across 5 languages. All measurements use Docker containers, median of 5 runs, 100 warm iterations, boolean-only validation (`is_valid`), 550 synthetically generated instances per dataset (500 valid + 50 invalid).
+
+**Warm mode** (schema pre-compiled, repeated validation) — lower is better:
+
+| Dataset | Zig | Rust | Go | JavaScript | Python |
+|---------|----:|-----:|---:|-----------:|-------:|
+| helm-chart-lock | **9 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
+| dependabot | **17 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
+| geojson | **42 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
+| openapi | 1,213 ms | 7,454 ms | 4,219 ms | **262 ms** | 345,985 ms |
+| tsconfig | **43 ms** | 89 ms | 367 ms | — | 4,475 ms |
+| github-workflow | 66 ms | **56 ms** | 1,259 ms | 300 ms | 21,693 ms |
+| package-json | **41 ms** | — | — | — | 3,163 ms |
+| cspell | **76 ms** | — | — | 244 ms | 5,468 ms |
+
+**Cold mode** (schema compilation + single validation pass):
+
+| Dataset | Zig | Rust | Go | JavaScript | Python |
+|---------|----:|-----:|---:|-----------:|-------:|
+| helm-chart-lock | **0.1 ms** | 14 ms | 95 ms | 222 ms | 25 ms |
+| dependabot | **0.2 ms** | 54 ms | 263 ms | 582 ms | 28 ms |
+| geojson | **0.9 ms** | 326 ms | 1,599 ms | 7,726 ms | 294 ms |
+| openapi | **15 ms** | 12,262 ms | 1,886 ms | 4,176 ms | 3,381 ms |
+| tsconfig | **1.5 ms** | 2,196 ms | 2,014 ms | — | 50 ms |
+| github-workflow | **2.1 ms** | 568 ms | 1,834 ms | 7,604 ms | 225 ms |
+| package-json | **1.5 ms** | 201 ms | 1,130 ms | — | 36 ms |
+| cspell | **2.1 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
+
+<details>
+<summary>Benchmark details</summary>
+
+- **Machine**: Apple M4 Pro (12 cores, 48GB RAM), macOS 15.5
+- **Isolation**: Docker containers per language
+- **Libraries**: Rust [jsonschema](https://crates.io/crates/jsonschema) 0.28.3, Go [santhosh-tekuri/jsonschema](https://github.com/santhosh-tekuri/jsonschema) v6, JS [Ajv](https://ajv.js.org/) 8.17, Python [jsonschema](https://pypi.org/project/jsonschema/) 4.23
+- **Schemas**: Real-world schemas from [SchemaStore](https://www.schemastore.org/), [OpenAPI Initiative](https://www.openapis.org/), [GeoJSON](https://geojson.org/)
+- **Instances**: Synthetically generated (500 valid + 50 invalid per dataset, deterministic seed)
+- **"—"** means the library failed to compile or validate the schema
+- Reproduction: [github.com/ktmage/jsonschema-bench](https://github.com/ktmage/jsonschema-bench)
+
+</details>
+
 ## Building & Testing
 
 ```bash
