@@ -862,7 +862,28 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             }
             return true; // All properties covered by ceiling
         },
-        .pattern_properties_compiled => return null, // too complex for inline
+        .pattern_properties_compiled => |pp_entries| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            // Only handle if all patterns use simple_prefix (no regex allocation needed)
+            for (pp_entries) |pp_entry| {
+                if (pp_entry.regex.simple_prefix == null) return null;
+            }
+            const keys = obj.keys();
+            const vals = obj.values();
+            for (keys, vals) |key, val| {
+                for (pp_entries) |pp_entry| {
+                    const prefix = pp_entry.regex.simple_prefix.?;
+                    if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
+                        const result = validateLinkedSchema(pp_entry.schema, val, compiled) orelse return null;
+                        if (!result) return false;
+                    }
+                }
+            }
+            return true;
+        },
         .generic => return null, // can't inline generic validators
     }
 }
@@ -1070,7 +1091,13 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
     if (node.simple_type != .none) return true;
     for (node.validators) |v| {
         switch (v) {
-            .generic, .pattern_properties_compiled => return false,
+            .generic => return false,
+            .pattern_properties_compiled => |pp| {
+                // Only inlinable if all patterns use simple prefix
+                for (pp) |entry| {
+                    if (entry.regex.simple_prefix == null) return false;
+                }
+            },
             else => {},
         }
     }
