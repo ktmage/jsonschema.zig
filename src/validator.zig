@@ -692,7 +692,9 @@ pub fn validateAll(ctx: Context) void {
                         for (oo.schemas) |s| {
                             if (s.type_mask & inst_mask == 0) continue;
                             if (s.node) |snode| {
-                                if (!snode.needs_uri_resolution) {
+                                const can_skip_o = !snode.needs_uri_resolution or
+                                    (!snode.has_id and ctx.registry == null);
+                                if (can_skip_o) {
                                     if (snode.isValidFast(ctx.instance, compiled)) |result| {
                                         if (result) {
                                             match_count += 1;
@@ -808,29 +810,39 @@ pub fn validateAll(ctx: Context) void {
                             },
                         };
                         if (ctx.evaluated_props == null) {
-                            // Single-pass over instance keys/values (avoids hashmap lookups)
                             const keys = inst_obj.keys();
                             const vals = inst_obj.values();
                             var found_mask: u64 = 0;
                             var additional_count: usize = 0;
                             var need_slow = false;
                             for (keys, vals) |key, val| {
-                                var matched = false;
-                                for (of.properties, 0..) |entry, pi| {
-                                    if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
-                                        found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
-                                        if (entry.schema.node) |enode| {
-                                            if (!enode.needs_uri_resolution) {
-                                                if (enode.isValidFast(val, compiled)) |result| {
-                                                    if (result) { matched = true; break; }
-                                                }
+                                // Find matching schema property
+                                const pi_opt: ?usize = if (of.property_map) |pmap|
+                                    if (pmap.get(key)) |pi| @as(usize, pi) else null
+                                else blk: {
+                                    for (of.properties, 0..) |entry, pi| {
+                                        if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name))
+                                            break :blk @as(?usize, pi);
+                                    }
+                                    break :blk null;
+                                };
+                                if (pi_opt) |pi| {
+                                    found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                                    const entry = of.properties[pi];
+                                    if (entry.schema.node) |enode| {
+                                        const can_skip_of = !enode.needs_uri_resolution or
+                                            (!enode.has_id and ctx.registry == null);
+                                        if (can_skip_of) {
+                                            if (enode.isValidFast(val, compiled)) |result| {
+                                                if (result) continue;
                                             }
                                         }
-                                        need_slow = true;
-                                        break;
                                     }
+                                    need_slow = true;
+                                    break;
+                                } else {
+                                    additional_count += 1;
                                 }
-                                if (!matched and !need_slow) additional_count += 1;
                                 if (need_slow) break;
                             }
                             if (!need_slow) {

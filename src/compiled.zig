@@ -214,9 +214,11 @@ pub const CompiledValidator = union(enum) {
     // avoiding per-property hashmap lookups. Uses bitmask for required tracking.
     object_fast: struct {
         properties: []const PropertyEntry,
-        required_mask: u64, // bitmask: bit i set if properties[i] is required
+        required_mask: u64,
         additional_false: bool,
         has_type_object: bool,
+        /// Pre-built hashmap for O(1) property lookup (populated for schemas with >8 properties)
+        property_map: ?*std.StringHashMap(u32) = null,
     },
 
     // Pre-linked local $ref (fragment-only, no registry needed)
@@ -658,23 +660,36 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 .object => |o| o,
                 else => return if (of.has_type_object) false else true,
             };
-            // Single-pass over instance key-value pairs (avoids hashmap lookups)
             const keys = obj.keys();
             const vals = obj.values();
             var found_mask: u64 = 0;
             var additional_count: usize = 0;
-            for (keys, vals) |key, val| {
-                var matched = false;
-                for (of.properties, 0..) |entry, pi| {
-                    if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
+            if (of.property_map) |pmap| {
+                // O(1) property lookup via hashmap (for large schemas)
+                for (keys, vals) |key, val| {
+                    if (pmap.get(key)) |pi| {
                         found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
-                        const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                        const result = validateLinkedSchema(of.properties[pi].schema, val, compiled) orelse return null;
                         if (!result) return false;
-                        matched = true;
-                        break;
+                    } else {
+                        additional_count += 1;
                     }
                 }
-                if (!matched) additional_count += 1;
+            } else {
+                // Linear scan for small schemas
+                for (keys, vals) |key, val| {
+                    var matched = false;
+                    for (of.properties, 0..) |entry, pi| {
+                        if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
+                            found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                            const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                            if (!result) return false;
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched) additional_count += 1;
+                }
             }
             // Check additionalProperties: false
             if (of.additional_false and additional_count > 0) return false;
@@ -1924,12 +1939,26 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
         }
     }
 
+    // Build property hashmap for large schemas
+    var property_map: ?*std.StringHashMap(u32) = null;
+    const props = properties_data.?;
+    if (props.len > 8) {
+        if (alloc.create(std.StringHashMap(u32))) |hm| {
+            hm.* = std.StringHashMap(u32).init(alloc);
+            for (props, 0..) |entry, pi| {
+                hm.put(entry.name, @intCast(pi)) catch {};
+            }
+            property_map = hm;
+        } else |_| {}
+    }
+
     // Build the merged validator
     const merged = CompiledValidator{ .object_fast = .{
-        .properties = properties_data.?,
+        .properties = props,
         .required_mask = required_mask,
         .additional_false = additional_false,
         .has_type_object = has_type_object,
+        .property_map = property_map,
     } };
 
     // Remove the merged validators (in reverse order to preserve indices)
