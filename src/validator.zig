@@ -984,7 +984,11 @@ pub fn validateAll(ctx: Context) void {
                                 }
                             }
                         }
-                        @import("keywords/items.zig").validate(ctx);
+                        if (ic.is_additional_items) {
+                            @import("keywords/additional_items.zig").validate(ctx);
+                        } else {
+                            @import("keywords/items.zig").validate(ctx);
+                        }
                     },
                     .object_fast => |of| {
                         // Combined type + required + properties + additionalProperties in one pass
@@ -1385,11 +1389,16 @@ pub fn validateAll(ctx: Context) void {
                             break;
                         }
                         if (!all_valid) {
-                            // Slow path for error details
+                            // Slow path: use items.validate for Draft 7 tuple items,
+                            // prefix_items.validate for Draft 2020-12
                             var child = ctx;
                             child.current_keyword_value = null;
                             child.compiled_node = null;
-                            @import("keywords/prefix_items.zig").validate(child);
+                            if (ctx.schema.object.get("prefixItems") != null) {
+                                @import("keywords/prefix_items.zig").validate(child);
+                            } else {
+                                @import("keywords/items.zig").validate(child);
+                            }
                         }
                     },
                     .dependent_schemas_compiled => |deps| {

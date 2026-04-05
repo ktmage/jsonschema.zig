@@ -252,6 +252,7 @@ pub const CompiledValidator = union(enum) {
 pub const ItemsCompiled = struct {
     schema: LinkedSchema,
     prefix_count: usize,
+    is_additional_items: bool = false,
 };
 
 pub const GenericValidator = struct {
@@ -1735,13 +1736,30 @@ fn compileKeywords(
                     validators.append(.{ .items_compiled = ic_val }) catch {};
                 } else |_| {}
             },
-            else => {
-                validators.append(makeGeneric(alloc, @import("keywords/items.zig").validate, kv, "items")) catch {};
+            .array => |arr| {
+                var linked = std.ArrayList(LinkedSchema).init(alloc);
+                for (arr.items) |item| linked.append(linkSchema(node_map, item)) catch {};
+                if (linked.items.len > 0) validators.append(.{ .prefix_items_compiled = linked.toOwnedSlice() catch &.{} }) catch {};
             },
+            else => {},
         }
     }
-    if (obj.get("additionalItems")) |kv| {
-        validators.append(makeGeneric(alloc, @import("keywords/additional_items.zig").validate, kv, "additionalItems")) catch {};
+    if (obj.get("additionalItems")) |ai_kv| {
+        if (ai_kv == .object) {
+            const tuple_len: usize = if (obj.get("items")) |iv| switch (iv) { .array => |a| a.items.len, else => 0 } else 0;
+            if (tuple_len > 0) {
+                if (alloc.create(ItemsCompiled)) |ic| {
+                    ic.* = .{ .schema = linkSchema(node_map, ai_kv), .prefix_count = tuple_len, .is_additional_items = true };
+                    validators.append(.{ .items_compiled = ic }) catch {};
+                } else |_| {
+                    validators.append(makeGeneric(alloc, @import("keywords/additional_items.zig").validate, ai_kv, "additionalItems")) catch {};
+                }
+            } else {
+                validators.append(makeGeneric(alloc, @import("keywords/additional_items.zig").validate, ai_kv, "additionalItems")) catch {};
+            }
+        } else {
+            validators.append(makeGeneric(alloc, @import("keywords/additional_items.zig").validate, ai_kv, "additionalItems")) catch {};
+        }
     }
     if (obj.get("minItems")) |kv| {
         if (!validation_vocab_disabled) {
