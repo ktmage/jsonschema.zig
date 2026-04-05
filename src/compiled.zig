@@ -739,8 +739,12 @@ fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value,
             return true;
         }
     }
+    // Optimized: only compare items of the same JSON type
+    // (different types can never be equal in JSON)
     for (0..arr.len - 1) |i| {
+        const tag_i = @intFromEnum(std.meta.activeTag(arr[i]));
         for (i + 1..arr.len) |j| {
+            if (@intFromEnum(std.meta.activeTag(arr[j])) != tag_i) continue;
             if (@import("keywords/enum_keyword.zig").jsonEqual(arr[i], arr[j])) return false;
         }
     }
@@ -1046,18 +1050,9 @@ fn isValid_additional_properties_false(data: *allowzero const anyopaque, instanc
             if (!found) {
                 var pattern_match = false;
                 for (patterns) |cr| {
-                    if (cr.simple_prefix) |prefix| {
-                        if (key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)) {
-                            pattern_match = true;
-                            break;
-                        }
-                    } else if (cr.is_identifier) {
-                        if (matchesIdentifierPattern(key)) {
-                            pattern_match = true;
-                            break;
-                        }
-                    } else {
-                        return null;
+                    if (cr.matches(key, null)) {
+                        pattern_match = true;
+                        break;
                     }
                 }
                 if (!pattern_match) return false;
@@ -1287,33 +1282,18 @@ fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instanc
         .object => |o| o,
         else => return true,
     };
+    // Check all patterns have at least some matching capability
     for (pp_entries) |pp_entry| {
-        if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and pp_entry.regex.char_class == null and pp_entry.regex.literal_set == null) return null;
+        if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and
+            pp_entry.regex.char_class == null and pp_entry.regex.literal_set == null and
+            pp_entry.regex.ci_literal == null and !pp_entry.regex.valid) return null;
     }
     const keys = obj.keys();
     const vals = obj.values();
     for (keys, vals) |key, val| {
+        if (key.len >= 512) return null; // key too long for stack buffer
         for (pp_entries) |pp_entry| {
-            const matched = if (pp_entry.regex.simple_prefix) |prefix|
-                key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)
-            else if (pp_entry.regex.is_identifier)
-                matchesIdentifierPattern(key)
-            else if (pp_entry.regex.char_class) |bm|
-                matchesCharClass(key, bm, pp_entry.regex.char_class_mode)
-            else if (pp_entry.regex.literal_set) |lset| blk: {
-                for (lset) |lit| {
-                    if (key.len == lit.len) {
-                        var m = true;
-                        for (key, lit) |a, b| {
-                            const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
-                            if (al != b) { m = false; break; }
-                        }
-                        if (m) break :blk true;
-                    }
-                }
-                break :blk false;
-            } else
-                false;
+            const matched = pp_entry.regex.matches(key, null);
             if (matched) {
                 const result = validateLinkedSchema(pp_entry.schema, val, compiled) orelse return null;
                 if (!result) return false;
@@ -2328,7 +2308,29 @@ fn compileKeywords(
         }
     }
     if (obj.get("$dynamicRef")) |kv| {
-        validators.append(makeGeneric(alloc, @import("keywords/dynamic_ref.zig").validate, kv, "$dynamicRef")) catch {};
+        // Try to resolve $dynamicRef via anchor cache at compile time
+        const ref_str = switch (kv) { .string => |s| s, else => null };
+        var compiled_as_ref = false;
+        if (ref_str) |rs| {
+            // Extract fragment: #anchor_name
+            if (std.mem.lastIndexOfScalar(u8, rs, '#')) |hash_pos| {
+                const anchor = rs[hash_pos + 1 ..];
+                if (anchor.len > 0) {
+                    // Resolve via the root schema's anchor cache
+                    const resolved = findDynamicAnchorInSchema(root_schema, anchor);
+                    if (resolved) |target| {
+                        if (alloc.create(LinkedSchema)) |ls| {
+                            ls.* = linkSchema(node_map, target);
+                            validators.append(CompiledValidator.initPtr(.ref_local, ls, &isValid_ref_local)) catch {};
+                            compiled_as_ref = true;
+                        } else |_| {}
+                    }
+                }
+            }
+        }
+        if (!compiled_as_ref) {
+            validators.append(makeGeneric(alloc, @import("keywords/dynamic_ref.zig").validate, kv, "$dynamicRef")) catch {};
+        }
     }
 
     // Conditional
@@ -3519,6 +3521,30 @@ fn buildLocalRefCache(
         },
         else => {},
     }
+}
+
+/// Find a $dynamicAnchor in a schema tree (compile-time resolution).
+fn findDynamicAnchorInSchema(schema: std.json.Value, anchor_name: []const u8) ?std.json.Value {
+    switch (schema) {
+        .object => |obj| {
+            if (obj.get("$dynamicAnchor")) |da| {
+                if (da == .string and std.mem.eql(u8, da.string, anchor_name)) {
+                    return schema;
+                }
+            }
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                if (findDynamicAnchorInSchema(entry.value_ptr.*, anchor_name)) |found| return found;
+            }
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (findDynamicAnchorInSchema(item, anchor_name)) |found| return found;
+            }
+        },
+        else => {},
+    }
+    return null;
 }
 
 /// Pre-resolve all $anchor and $dynamicAnchor in the schema tree.
