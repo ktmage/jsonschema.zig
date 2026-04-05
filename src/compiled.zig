@@ -2814,7 +2814,18 @@ fn detectEscapedPrefix(alloc: Allocator, pattern: []const u8) ?[]const u8 {
             }
         }
     }
-    if (buf.items.len >= 2) return buf.toOwnedSlice() catch null;
+    // Only use as simple_prefix if remaining pattern is empty or just .*/$
+    // (i.e., the prefix is a sufficient condition for matching)
+    if (buf.items.len >= 2) {
+        const remaining = pattern[i..];
+        if (remaining.len == 0 or
+            std.mem.eql(u8, remaining, "$") or
+            std.mem.eql(u8, remaining, ".*") or
+            std.mem.eql(u8, remaining, ".*$"))
+        {
+            return buf.toOwnedSlice() catch null;
+        }
+    }
     return null;
 }
 
