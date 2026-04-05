@@ -697,13 +697,22 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             return true;
         },
         .one_of_compiled => |oo| {
-            // Discriminator fast path
+            // Discriminator fast path (enum value or property existence)
             if (oo.discriminator_field) |field| {
                 if (oo.discriminator_map) |dmap| {
                     const inst_obj = switch (instance) {
                         .object => |o| o,
                         else => return null,
                     };
+                    if (oo.discriminator_is_exists) {
+                        // Property-existence discriminator: check which branch's key exists
+                        for (dmap) |entry| {
+                            if (inst_obj.get(entry.value) != null) {
+                                return validateLinkedSchema(entry.schema, instance, compiled);
+                            }
+                        }
+                        return null; // no match
+                    }
                     const disc_val = inst_obj.get(field) orelse return null;
                     const disc_str = switch (disc_val) {
                         .string => |s| s,
@@ -1974,7 +1983,7 @@ fn compileKeywords(
                 // Try to detect discriminator pattern
                 const disc = detectDiscriminator(alloc, arr.items, linked);
                 if (alloc.create(OneOfCompiled)) |oo| {
-                    oo.* = .{ .schemas = linked, .discriminator_field = disc.field, .discriminator_map = disc.map };
+                    oo.* = .{ .schemas = linked, .discriminator_field = disc.field, .discriminator_map = disc.map, .discriminator_is_exists = disc.is_exists };
                     validators.append(.{ .one_of_compiled = oo }) catch {};
                 } else |_| {}
             },
@@ -2057,29 +2066,38 @@ fn compileKeywords(
 /// Detect a discriminator pattern in oneOf branches.
 /// If all branches have `properties.<field>.enum` with exactly 1 unique value,
 /// we can use that field as a discriminator for O(1) branch selection.
+const DiscriminatorResult = struct {
+    field: ?[]const u8,
+    map: ?[]const DiscriminatorEntry,
+    is_exists: bool,
+};
+
 fn detectDiscriminator(
     alloc: Allocator,
     branches: []const std.json.Value,
     linked: []const LinkedSchema,
-) struct { field: ?[]const u8, map: ?[]const DiscriminatorEntry } {
-    if (branches.len < 2) return .{ .field = null, .map = null };
+) DiscriminatorResult {
+    if (branches.len < 2) return .{ .field = null, .map = null, .is_exists = false };
 
     // Try common discriminator field names
     const candidates = [_][]const u8{ "type", "kind", "discriminator" };
     for (candidates) |field| {
         if (tryBuildDiscriminatorMap(alloc, field, branches, linked)) |dmap| {
-            return .{ .field = field, .map = dmap };
+            return .{ .field = field, .map = dmap, .is_exists = false };
         }
     }
 
     // Try any field that has enum in the first branch
     const first = switch (branches[0]) {
         .object => |o| o,
-        else => return .{ .field = null, .map = null },
+        else => return .{ .field = null, .map = null, .is_exists = false },
     };
-    const props = switch (first.get("properties") orelse return .{ .field = null, .map = null }) {
+    const props = switch (first.get("properties") orelse {
+        // No properties — try required-field discriminator
+        return detectRequiredDiscriminator(alloc, branches, linked);
+    }) {
         .object => |o| o,
-        else => return .{ .field = null, .map = null },
+        else => return detectRequiredDiscriminator(alloc, branches, linked),
     };
     var pit = props.iterator();
     while (pit.next()) |entry| {
@@ -2090,12 +2108,46 @@ fn detectDiscriminator(
         };
         if (prop_schema.get("enum") != null) {
             if (tryBuildDiscriminatorMap(alloc, prop_name, branches, linked)) |dmap| {
-                return .{ .field = prop_name, .map = dmap };
+                return .{ .field = prop_name, .map = dmap, .is_exists = false };
             }
         }
     }
 
-    return .{ .field = null, .map = null };
+    // Try required-field discriminator as fallback
+    return detectRequiredDiscriminator(alloc, branches, linked);
+}
+
+/// Detect oneOf branches that differ by unique required fields.
+/// E.g., [{required: ["uses"]}, {required: ["run"]}] → discriminate by property existence.
+fn detectRequiredDiscriminator(
+    alloc: Allocator,
+    branches: []const std.json.Value,
+    linked: []const LinkedSchema,
+) DiscriminatorResult {
+    const null_result = DiscriminatorResult{ .field = null, .map = null, .is_exists = false };
+    if (branches.len != 2) return null_result; // only support 2-branch for now
+
+    // Each branch must have a unique required field
+    var unique_fields: [2]?[]const u8 = .{ null, null };
+    for (branches, 0..) |branch, bi| {
+        const obj = switch (branch) { .object => |o| o, else => return null_result };
+        const req = switch (obj.get("required") orelse return null_result) { .array => |a| a.items, else => return null_result };
+        if (req.len != 1) return null_result;
+        unique_fields[bi] = switch (req[0]) { .string => |s| s, else => return null_result };
+    }
+
+    const f0 = unique_fields[0] orelse return null_result;
+    const f1 = unique_fields[1] orelse return null_result;
+    if (std.mem.eql(u8, f0, f1)) return null_result; // same field = not a discriminator
+
+    var dmap = std.ArrayList(DiscriminatorEntry).init(alloc);
+    dmap.append(.{ .value = f0, .schema = linked[0] }) catch return null_result;
+    dmap.append(.{ .value = f1, .schema = linked[1] }) catch return null_result;
+    return .{
+        .field = "_required_exists",
+        .map = dmap.toOwnedSlice() catch return null_result,
+        .is_exists = true,
+    };
 }
 
 fn tryBuildDiscriminatorMap(
