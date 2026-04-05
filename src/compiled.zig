@@ -367,10 +367,17 @@ pub const CompiledRegex = struct {
         if (self.is_identifier) return matchesIdentifierPattern(str);
         // Regex path: need null-terminated string
         if (!self.valid) return false;
-        // Fast path: literal string set (e.g., ^(include|exclude)$)
+        // Fast path: literal string set (case-insensitive, lowercase stored)
         if (self.literal_set) |lset| {
             for (lset) |lit| {
-                if (str.len == lit.len and std.mem.eql(u8, str, lit)) return true;
+                if (str.len == lit.len) {
+                    var match = true;
+                    for (str, lit) |a, b| {
+                        const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+                        if (al != b) { match = false; break; }
+                    }
+                    if (match) return true;
+                }
             }
             return false;
         }
@@ -1268,7 +1275,14 @@ fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instanc
                 matchesCharClass(key, bm, pp_entry.regex.char_class_mode)
             else if (pp_entry.regex.literal_set) |lset| blk: {
                 for (lset) |lit| {
-                    if (key.len == lit.len and std.mem.eql(u8, key, lit)) break :blk true;
+                    if (key.len == lit.len) {
+                        var m = true;
+                        for (key, lit) |a, b| {
+                            const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+                            if (al != b) { m = false; break; }
+                        }
+                        if (m) break :blk true;
+                    }
                 }
                 break :blk false;
             } else
@@ -2694,6 +2708,8 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
         if (detectCharClass(pattern_str)) |cc| {
             cr.char_class = cc.bitmap;
             cr.char_class_mode = cc.mode;
+        } else if (expandRegexToLiterals(alloc, pattern_str)) |lset| {
+            cr.literal_set = lset;
         } else if (detectLiteralSet(alloc, pattern_str)) |lset| {
             cr.literal_set = lset;
         } else if (detectCILiteral(alloc, pattern_str)) |ci| {
@@ -2774,12 +2790,48 @@ fn detectLiteralSet(alloc: Allocator, pattern: []const u8) ?[]const []const u8 {
     // Split group by | and build each alternative
     var it = std.mem.splitScalar(u8, group, '|');
     while (it.next()) |alt| {
-        for (alt) |ch| { switch (ch) { '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '\\' => return null, else => {} } }
-        alternatives.append(std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ prefix, alt, suffix }) catch return null) catch return null;
+        // Try to parse as literal (possibly with [Xx] CI pairs)
+        const parsed = parseCIAlternative(alloc, alt) orelse return null;
+        alternatives.append(std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ prefix, parsed, suffix }) catch return null) catch return null;
     }
 
     if (alternatives.items.len < 2 or alternatives.items.len > 16) return null;
     return alternatives.toOwnedSlice() catch null;
+}
+
+/// Parse an alternative that may contain [Xx] case-insensitive pairs.
+/// Returns lowercase literal or null if unparseable.
+fn parseCIAlternative(alloc: Allocator, alt: []const u8) ?[]const u8 {
+    var buf = std.ArrayList(u8).init(alloc);
+    var i: usize = 0;
+    while (i < alt.len) {
+        const ch = alt[i];
+        if (ch == '[' and i + 3 < alt.len and alt[i + 3] == ']') {
+            const c1 = alt[i + 1];
+            const c2 = alt[i + 2];
+            if (c1 >= 'A' and c1 <= 'Z' and c2 == c1 + 32) {
+                buf.append(c2) catch return null;
+                i += 4;
+            } else if (c2 >= 'A' and c2 <= 'Z' and c1 == c2 + 32) {
+                buf.append(c1) catch return null;
+                i += 4;
+            } else {
+                return null;
+            }
+        } else {
+            switch (ch) {
+                '.', '*', '+', '?', '(', ')', '{', '}', '\\' => return null,
+                '[', ']' => return null,
+                '|' => return null,
+                else => {
+                    buf.append(ch) catch return null;
+                    i += 1;
+                },
+            }
+        }
+    }
+    if (buf.items.len == 0) return null;
+    return buf.toOwnedSlice() catch null;
 }
 
 fn detectCharClass(pattern: []const u8) ?struct { bitmap: CharBitmap, mode: CharClassMode } {
@@ -2826,6 +2878,119 @@ fn detectCharClass(pattern: []const u8) ?struct { bitmap: CharBitmap, mode: Char
 /// Returns the prefix string if so, null otherwise.
 /// Detect case-insensitive literal patterns like ^[Cc][Oo][Mm][Mm]...$
 /// Returns the lowercase literal if the pattern consists entirely of [Xx] pairs + `$`.
+/// Try to expand a regex pattern into a set of lowercase literal strings.
+/// Handles: [Xx] CI pairs, [abc] char classes, (a|b) alternation, (x)? optional groups.
+/// Returns null if the pattern is too complex.
+fn expandRegexToLiterals(alloc: Allocator, pattern: []const u8) ?[]const []const u8 {
+    if (pattern.len < 3 or pattern[0] != '^' or pattern[pattern.len - 1] != '$') return null;
+    const inner = pattern[1 .. pattern.len - 1];
+    var result = std.ArrayList([]const u8).init(alloc);
+    // Start with one empty string
+    result.append(alloc.dupe(u8, "") catch return null) catch return null;
+    if (!expandInto(alloc, &result, inner, 0)) return null;
+    if (result.items.len < 2 or result.items.len > 64) return null;
+    return result.toOwnedSlice() catch null;
+}
+
+fn expandInto(alloc: Allocator, result: *std.ArrayList([]const u8), pat: []const u8, start: usize) bool {
+    var i = start;
+    while (i < pat.len) {
+        const ch = pat[i];
+        if (ch == '[') {
+            // Character class: [Xx] or [356] or [AaUu]
+            const close = std.mem.indexOfScalarPos(u8, pat, i + 1, ']') orelse return false;
+            const chars = pat[i + 1 .. close];
+            if (chars.len < 1 or chars.len > 10) return false;
+            // Check for CI pair [Xx]
+            if (chars.len == 2 and chars[0] >= 'A' and chars[0] <= 'Z' and chars[1] == chars[0] + 32) {
+                // Append lowercase char to all current strings
+                appendCharToAll(alloc, result, chars[1]) orelse return false;
+            } else if (chars.len == 2 and chars[1] >= 'A' and chars[1] <= 'Z' and chars[0] == chars[1] + 32) {
+                appendCharToAll(alloc, result, chars[0]) orelse return false;
+            } else {
+                // Expand each char as an alternative
+                const current = result.items.len;
+                const originals = alloc.dupe([]const u8, result.items) catch return false;
+                result.clearRetainingCapacity();
+                // Deduplicate lowercase chars
+                var seen_chars: [128]bool = [_]bool{false} ** 128;
+                for (chars) |ch2| {
+                    const lc = if (ch2 >= 'A' and ch2 <= 'Z') ch2 + 32 else ch2;
+                    if (lc < 128 and seen_chars[lc]) continue;
+                    if (lc < 128) seen_chars[lc] = true;
+                    for (originals) |s| {
+                        const new = std.fmt.allocPrint(alloc, "{s}{c}", .{ s, lc }) catch return false;
+                        result.append(new) catch return false;
+                    }
+                }
+                if (result.items.len > 64) return false;
+                _ = current;
+            }
+            i = close + 1;
+        } else if (ch == '(') {
+            // Find matching close paren (handling nesting)
+            var depth: usize = 1;
+            var j = i + 1;
+            while (j < pat.len and depth > 0) : (j += 1) {
+                if (pat[j] == '(') depth += 1
+                else if (pat[j] == ')') depth -= 1;
+            }
+            if (depth != 0) return false;
+            const group = pat[i + 1 .. j - 1];
+            const is_optional = j < pat.len and pat[j] == '?';
+
+            // Split by top-level |
+            var alts = std.ArrayList([]const u8).init(alloc);
+            var alt_start: usize = 0;
+            var d: usize = 0;
+            for (group, 0..) |gc, gi| {
+                if (gc == '(') d += 1
+                else if (gc == ')') d -= 1
+                else if (gc == '|' and d == 0) {
+                    alts.append(group[alt_start..gi]) catch return false;
+                    alt_start = gi + 1;
+                }
+            }
+            alts.append(group[alt_start..]) catch return false;
+
+            const originals = alloc.dupe([]const u8, result.items) catch return false;
+            result.clearRetainingCapacity();
+
+            if (is_optional) {
+                // Add originals unchanged (empty alternative)
+                for (originals) |s| result.append(alloc.dupe(u8, s) catch return false) catch return false;
+            }
+
+            for (alts.items) |alt| {
+                // For each alternative, expand recursively
+                var branch = std.ArrayList([]const u8).init(alloc);
+                for (originals) |s| branch.append(alloc.dupe(u8, s) catch return false) catch return false;
+                if (!expandInto(alloc, &branch, alt, 0)) return false;
+                for (branch.items) |s| result.append(s) catch return false;
+            }
+
+            if (result.items.len > 64) return false;
+            i = if (is_optional) j + 1 else j;
+        } else if (ch == '|' or ch == ')') {
+            return false; // shouldn't reach top-level | or )
+        } else if (ch == '.' or ch == '*' or ch == '+' or ch == '?' or ch == '{' or ch == '}' or ch == '\\') {
+            return false;
+        } else {
+            // Literal character
+            const lc = if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
+            appendCharToAll(alloc, result, lc) orelse return false;
+            i += 1;
+        }
+    }
+    return true;
+}
+
+fn appendCharToAll(alloc: Allocator, list: *std.ArrayList([]const u8), ch: u8) ?void {
+    for (list.items, 0..) |s, idx| {
+        list.items[idx] = std.fmt.allocPrint(alloc, "{s}{c}", .{ s, ch }) catch return null;
+    }
+}
+
 fn detectCILiteral(alloc: Allocator, pattern: []const u8) ?[]const u8 {
     if (pattern.len < 6 or pattern[0] != '^' or pattern[pattern.len - 1] != '$') return null;
     var buf = std.ArrayList(u8).init(alloc);
