@@ -10,19 +10,26 @@ pub const FastRegex = struct {
     ops: []const Op,
 
     const Op = struct {
-        kind: Kind,
+        /// 128-bit bitmap: all matching characters have their bit set.
+        low: u64,
+        high: u64,
         min: u16 = 1,
         max: u16 = 1, // 0 = unlimited
+        /// If this op matches exactly one character, store it for optimization
+        literal_char: u8 = 0,
+        is_literal: bool = false,
+
+        fn matchChar(self: Op, ch: u8) bool {
+            if (ch >= 128) return false;
+            if (ch < 64) return (self.low >> @as(u6, @intCast(ch))) & 1 != 0;
+            return (self.high >> @as(u6, @intCast(ch - 64))) & 1 != 0;
+        }
     };
 
-    const Kind = union(enum) {
-        literal: u8,
-        char_class: CharClass,
-        dot, // any char
-    };
+    // Legacy type aliases for backwards compatibility in parsing
+    const Kind = union(enum) { literal: u8, char_class: CharClass, dot };
 
     const CharClass = struct {
-        /// 128-bit bitmap for ASCII characters
         low: u64 = 0,
         high: u64 = 0,
         negated: bool = false,
@@ -147,7 +154,35 @@ pub const FastRegex = struct {
                 }
             }
 
-            ops.append(.{ .kind = kind, .min = min, .max = max }) catch return null;
+            // Convert Kind to unified bitmap Op
+            var op_low: u64 = 0;
+            var op_high: u64 = 0;
+            switch (kind) {
+                .literal => |lit| {
+                    if (lit < 64) op_low = @as(u64, 1) << @as(u6, @intCast(lit))
+                    else if (lit < 128) op_high = @as(u64, 1) << @as(u6, @intCast(lit - 64));
+                },
+                .char_class => |cc| {
+                    if (cc.negated) {
+                        // Set all ASCII bits, then clear the specified ones
+                        op_low = ~cc.low;
+                        op_high = ~cc.high;
+                        // Clear newline (0x0a) for compatibility
+                        op_low &= ~(@as(u64, 1) << 10);
+                    } else {
+                        op_low = cc.low;
+                        op_high = cc.high;
+                    }
+                },
+                .dot => {
+                    // Match any char except newline
+                    op_low = ~(@as(u64, 1) << 10); // all bits except \n
+                    op_high = ~@as(u64, 0);
+                },
+            }
+            const is_lit = (kind == .literal);
+            const lit_ch: u8 = if (kind == .literal) kind.literal else 0;
+            ops.append(.{ .low = op_low, .high = op_high, .min = min, .max = max, .literal_char = lit_ch, .is_literal = is_lit }) catch return null;
         }
 
         return FastRegex{ .ops = ops.toOwnedSlice() catch return null };
@@ -177,24 +212,24 @@ pub const FastRegex = struct {
             // Match minimum
             var count: u16 = 0;
             while (count < op.min) {
-                if (pos >= input.len or !matchOne(op.kind, input[pos])) return null;
+                if (pos >= input.len or !op.matchChar(input[pos])) return null;
                 pos += 1;
                 count += 1;
             }
             // Check if next op is a literal (optimize greedy+literal)
-            const has_next_lit = oi + 1 < ops.len and ops[oi + 1].kind == .literal;
+            const has_next_lit = oi + 1 < ops.len and ops[oi + 1].is_literal;
             if (has_next_lit and (op.max == 0 or op.max > op.min)) {
-                const next_lit = ops[oi + 1].kind.literal;
+                const next_lit = ops[oi + 1].literal_char;
                 // Forward scan: track last position where next_lit occurs
                 var last_lit_pos: ?usize = null;
                 var scan_pos = pos;
                 if (op.max == 0) {
-                    while (scan_pos < input.len and matchOne(op.kind, input[scan_pos])) {
+                    while (scan_pos < input.len and op.matchChar(input[scan_pos])) {
                         if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
                         scan_pos += 1;
                     }
                 } else {
-                    while (count < op.max and scan_pos < input.len and matchOne(op.kind, input[scan_pos])) {
+                    while (count < op.max and scan_pos < input.len and op.matchChar(input[scan_pos])) {
                         if (input[scan_pos] == next_lit) last_lit_pos = scan_pos;
                         scan_pos += 1;
                         count += 1;
@@ -213,9 +248,9 @@ pub const FastRegex = struct {
             }
             // Standard greedy (no literal follows)
             if (op.max == 0) {
-                while (pos < input.len and matchOne(op.kind, input[pos])) pos += 1;
+                while (pos < input.len and op.matchChar(input[pos])) pos += 1;
             } else {
-                while (count < op.max and pos < input.len and matchOne(op.kind, input[pos])) { pos += 1; count += 1; }
+                while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
             }
             oi += 1;
         }
@@ -238,7 +273,7 @@ pub const FastRegex = struct {
                 var ok = true;
                 var count: u16 = 0;
                 while (count < op.min) {
-                    if (pos >= input.len or !matchOne(op.kind, input[pos])) { ok = false; break; }
+                    if (pos >= input.len or !op.matchChar(input[pos])) { ok = false; break; }
                     pos += 1;
                     count += 1;
                 }
@@ -247,9 +282,9 @@ pub const FastRegex = struct {
                 // Greedy: match maximum
                 const greedy_start = pos;
                 if (op.max == 0) {
-                    while (pos < input.len and matchOne(op.kind, input[pos])) pos += 1;
+                    while (pos < input.len and op.matchChar(input[pos])) pos += 1;
                 } else {
-                    while (count < op.max and pos < input.len and matchOne(op.kind, input[pos])) { pos += 1; count += 1; }
+                    while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
                 }
 
                 // Push backtrack point if greedy consumed extra chars
@@ -276,8 +311,8 @@ pub const FastRegex = struct {
 
             // Smart backtrack: if the next op is a literal, scan backward for it
             // This turns O(n) backtrack steps into O(1) for literal-after-greedy patterns
-            if (oi < ops.len and ops[oi].kind == .literal and ops[oi].min >= 1) {
-                const lit = ops[oi].kind.literal;
+            if (oi < ops.len and ops[oi].is_literal and ops[oi].min >= 1) {
+                const lit = ops[oi].literal_char;
                 if (input[pos] != lit) {
                     // Current pos doesn't match literal — scan backward
                     var scan_pos = pos;
