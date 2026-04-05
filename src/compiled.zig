@@ -587,8 +587,40 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
                 .array => |a| a.items,
                 else => return true,
             };
-            // O(n²) but needed for correctness
             if (arr.len <= 1) return true;
+            // Fast path: all-strings arrays use hash-based O(n) check
+            if (arr.len <= 64) {
+                var all_strings = true;
+                for (arr) |item| {
+                    if (item != .string) { all_strings = false; break; }
+                }
+                if (all_strings) {
+                    // Bitmask-based: hash each string and check for collisions
+                    var seen: u64 = 0;
+                    for (arr) |item| {
+                        const s = item.string;
+                        var h: u64 = 0;
+                        for (s) |ch| h = h *% 31 +% ch;
+                        const bit = @as(u6, @intCast(h & 63));
+                        const mask = @as(u64, 1) << bit;
+                        if (seen & mask != 0) {
+                            // Collision — verify with full check for this pair
+                            for (0..arr.len - 1) |i| {
+                                if (arr[i] != .string) continue;
+                                for (i + 1..arr.len) |j| {
+                                    if (arr[j] != .string) continue;
+                                    if (arr[i].string.len == arr[j].string.len and
+                                        std.mem.eql(u8, arr[i].string, arr[j].string)) return false;
+                                }
+                            }
+                            return true;
+                        }
+                        seen |= mask;
+                    }
+                    return true;
+                }
+            }
+            // General O(n²) fallback
             for (0..arr.len - 1) |i| {
                 for (i + 1..arr.len) |j| {
                     if (@import("keywords/enum_keyword.zig").jsonEqual(arr[i], arr[j])) return false;
@@ -685,9 +717,22 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             }
             // Type-based filtering: skip branches that can't match the instance type
             const inst_type_mask = typeMaskForValue(instance);
+            // Fast path: count type-compatible branches first
+            var compatible_count: usize = 0;
+            var last_compatible_idx: usize = 0;
+            for (oo.schemas, 0..) |s, idx| {
+                if (s.type_mask & inst_type_mask != 0) {
+                    compatible_count += 1;
+                    last_compatible_idx = idx;
+                }
+            }
+            // If only one branch is type-compatible, it must be the match
+            if (compatible_count == 1) {
+                return validateLinkedSchema(oo.schemas[last_compatible_idx], instance, compiled);
+            }
             var match_count: usize = 0;
             for (oo.schemas) |s| {
-                if (s.type_mask & inst_type_mask == 0) continue; // type mismatch — skip
+                if (s.type_mask & inst_type_mask == 0) continue;
                 const result = validateLinkedSchema(s, instance, compiled) orelse return null;
                 if (result) {
                     match_count += 1;
@@ -937,13 +982,19 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             var match_count: usize = 0;
             for (arr) |item| {
                 if (validateLinkedSchema(cc.schema, item, compiled)) |result| {
-                    if (result) match_count += 1;
+                    if (result) {
+                        match_count += 1;
+                        // Early exit: exceeded maxContains
+                        if (cc.max_contains) |max| {
+                            if (match_count > max) return false;
+                        } else if (match_count >= cc.min_contains) {
+                            // No maxContains: once minContains reached, done
+                            return true;
+                        }
+                    }
                 } else return null;
             }
             if (match_count < cc.min_contains) return false;
-            if (cc.max_contains) |max| {
-                if (match_count > max) return false;
-            }
             return true;
         },
         .prefix_items_compiled => |schemas| {
@@ -1693,11 +1744,10 @@ fn compileKeywords(
     }
     if (obj.get("uniqueItems")) |kv| {
         if (!validation_vocab_disabled) {
-            // Only add if uniqueItems is true
             switch (kv) {
                 .bool => |b| {
                     if (b) {
-                        validators.append(makeGeneric(alloc, @import("keywords/unique_items.zig").validate, kv, "uniqueItems")) catch {};
+                        validators.append(.{ .unique_items = {} }) catch {};
                     }
                 },
                 else => {},
