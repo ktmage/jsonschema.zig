@@ -354,6 +354,8 @@ pub const CompiledRegex = struct {
     char_class_mode: CharClassMode = .first_char,
     /// Literal string set for patterns like ^(foo|bar)$ (max 8 alternatives)
     literal_set: ?[]const []const u8 = null,
+    /// Case-insensitive lowercase literal for patterns like ^[Cc][Oo][Mm]...$
+    ci_literal: ?[]const u8 = null,
 
     /// Check if a string matches this compiled pattern.
     pub fn matches(self: *const CompiledRegex, str: []const u8, allocator: ?std.mem.Allocator) bool {
@@ -371,6 +373,15 @@ pub const CompiledRegex = struct {
                 if (str.len == lit.len and std.mem.eql(u8, str, lit)) return true;
             }
             return false;
+        }
+        // Fast path: case-insensitive literal (e.g., ^[Cc][Oo][Mm]...$)
+        if (self.ci_literal) |lit| {
+            if (str.len != lit.len) return false;
+            for (str, lit) |a, b| {
+                const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+                if (al != b) return false;
+            }
+            return true;
         }
         // Fast path: character class bitmap
         if (self.char_class) |bm| return matchesCharClass(str, bm, self.char_class_mode);
@@ -1127,6 +1138,14 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
         return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
     }
     if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
+    if (cr.ci_literal) |lit| {
+        if (instance_str.len != lit.len) return false;
+        for (instance_str, lit) |a, b| {
+            const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+            if (al != b) return false;
+        }
+        return true;
+    }
     if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
     if (instance_str.len < 512) {
         var buf: [512]u8 = undefined;
@@ -2670,12 +2689,15 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     cr.char_class = null;
     cr.char_class_mode = .first_char;
     cr.literal_set = null;
+    cr.ci_literal = null;
     if (cr.simple_prefix == null and !cr.is_identifier) {
         if (detectCharClass(pattern_str)) |cc| {
             cr.char_class = cc.bitmap;
             cr.char_class_mode = cc.mode;
         } else if (detectLiteralSet(alloc, pattern_str)) |lset| {
             cr.literal_set = lset;
+        } else if (detectCILiteral(alloc, pattern_str)) |ci| {
+            cr.ci_literal = ci;
         }
     }
     const pattern_z = alloc.dupeZ(u8, pattern_str) catch return null;
@@ -2802,6 +2824,34 @@ fn detectCharClass(pattern: []const u8) ?struct { bitmap: CharBitmap, mode: Char
 
 /// Detect if a regex pattern is a simple "^literal" prefix match.
 /// Returns the prefix string if so, null otherwise.
+/// Detect case-insensitive literal patterns like ^[Cc][Oo][Mm][Mm]...$
+/// Returns the lowercase literal if the pattern consists entirely of [Xx] pairs + `$`.
+fn detectCILiteral(alloc: Allocator, pattern: []const u8) ?[]const u8 {
+    if (pattern.len < 6 or pattern[0] != '^' or pattern[pattern.len - 1] != '$') return null;
+    var buf = std.ArrayList(u8).init(alloc);
+    var i: usize = 1;
+    while (i < pattern.len - 1) { // -1 to skip $
+        if (pattern[i] == '[' and i + 3 < pattern.len and pattern[i + 3] == ']') {
+            const c1 = pattern[i + 1];
+            const c2 = pattern[i + 2];
+            // Check [Xx] pattern (uppercase then lowercase or vice versa)
+            if (c1 >= 'A' and c1 <= 'Z' and c2 == c1 + 32) {
+                buf.append(c2) catch return null; // store lowercase
+                i += 4;
+            } else if (c2 >= 'A' and c2 <= 'Z' and c1 == c2 + 32) {
+                buf.append(c1) catch return null;
+                i += 4;
+            } else {
+                return null; // not a simple case alternation
+            }
+        } else {
+            return null; // non-bracket character
+        }
+    }
+    if (buf.items.len >= 2) return buf.toOwnedSlice() catch null;
+    return null;
+}
+
 fn detectSimplePrefix(pattern: []const u8) ?[]const u8 {
     if (pattern.len < 2 or pattern[0] != '^') return null;
     // Check that the rest is a literal string (no regex metacharacters)
@@ -2901,12 +2951,15 @@ fn compilePatternProperties(
         cr.char_class = null;
         cr.char_class_mode = .first_char;
         cr.literal_set = null;
+        cr.ci_literal = null;
         if (cr.simple_prefix == null and !cr.is_identifier) {
             if (detectCharClass(pattern)) |cc| {
                 cr.char_class = cc.bitmap;
                 cr.char_class_mode = cc.mode;
             } else if (detectLiteralSet(alloc, pattern)) |lset| {
                 cr.literal_set = lset;
+            } else if (detectCILiteral(alloc, pattern)) |ci| {
+                cr.ci_literal = ci;
             }
         }
         const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
@@ -3152,6 +3205,7 @@ fn collectStaticCeiling(
                 cr.char_class = null;
                 cr.char_class_mode = .first_char;
                 cr.literal_set = null;
+                cr.ci_literal = null;
                 if (cr.simple_prefix == null and !cr.is_identifier) {
                     if (detectCharClass(pattern)) |cc| {
                         cr.char_class = cc.bitmap;
