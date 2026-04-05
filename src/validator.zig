@@ -679,7 +679,7 @@ pub fn validateAll(ctx: Context) void {
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip) {
                                     // Try isValid (handles ref_overrides, more cases than isValidFast)
-                                    if (snode.isValid(ctx.instance, compiled)) |result| {
+                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
                                         if (result) continue;
                                         any_failed = true;
                                         break;
@@ -756,7 +756,7 @@ pub fn validateAll(ctx: Context) void {
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip_o) {
                                     // Use isValid (handles ref_overrides without Context)
-                                    if (snode.isValid(ctx.instance, compiled)) |result| {
+                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
                                         if (result) {
                                             match_count += 1;
                                             if (match_count > 1) break;
