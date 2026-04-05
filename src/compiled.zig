@@ -165,10 +165,10 @@ pub const CompiledValidator = union(enum) {
     // Type checking
     type_single: SimpleType,
     type_multi: []const SimpleType,
-    enum_check: std.json.Value,
+    enum_check: []const std.json.Value,
     /// Pre-built string hashset for large string-only enums (O(1) lookup)
     enum_string_set: *std.StringHashMap(void),
-    const_check: std.json.Value,
+    const_check: *const std.json.Value,
 
     // Numeric
     minimum: f64,
@@ -490,12 +490,8 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             }
             return false;
         },
-        .enum_check => |enum_val| {
-            const enum_array = switch (enum_val) {
-                .array => |a| a.items,
-                else => return true,
-            };
-            for (enum_array) |candidate| {
+        .enum_check => |enum_items| {
+            for (enum_items) |candidate| {
                 if (@import("keywords/enum_keyword.zig").jsonEqual(instance, candidate)) return true;
             }
             return false;
@@ -508,7 +504,7 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             return set.get(str) != null;
         },
         .const_check => |const_val| {
-            return @import("keywords/enum_keyword.zig").jsonEqual(instance, const_val);
+            return @import("keywords/enum_keyword.zig").jsonEqual(instance, const_val.*);
         },
         .minimum => |limit| {
             return numCmp(instance, limit, .gte);
@@ -1525,16 +1521,16 @@ fn compileKeywords(
                     }
                     validators.append(.{ .enum_string_set = hm }) catch {};
                 } else |_| {
-                    validators.append(.{ .enum_check = kv }) catch {};
+                    switch (kv) { .array => |a| validators.append(.{ .enum_check = a.items }) catch {}, else => {} }
                 }
             } else {
-                validators.append(.{ .enum_check = kv }) catch {};
+                switch (kv) { .array => |a| validators.append(.{ .enum_check = a.items }) catch {}, else => {} }
             }
         }
     }
     if (obj.get("const")) |kv| {
         if (!validation_vocab_disabled) {
-            validators.append(.{ .const_check = kv }) catch {};
+            if (alloc.create(std.json.Value)) |vp| { vp.* = kv; validators.append(.{ .const_check = vp }) catch {}; } else |_| {}
         }
     }
 

@@ -469,13 +469,9 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("type", "Instance does not match any of the expected types");
                         }
                     },
-                    .enum_check => |enum_val| {
-                        const enum_array = switch (enum_val) {
-                            .array => |a| a.items,
-                            else => continue,
-                        };
+                    .enum_check => |enum_items| {
                         var found = false;
-                        for (enum_array) |candidate| {
+                        for (enum_items) |candidate| {
                             if (@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, candidate)) {
                                 found = true;
                                 break;
@@ -497,8 +493,8 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("enum", "Instance does not match any enum value");
                         }
                     },
-                    .const_check => |const_val| {
-                        if (!@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, const_val)) {
+                    .const_check => |const_val_ptr| {
+                        if (!@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, const_val_ptr.*)) {
                             ctx.addError("const", "Instance does not match the const value");
                         }
                     },
