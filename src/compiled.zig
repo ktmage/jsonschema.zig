@@ -2636,7 +2636,7 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
         else => return null,
     };
     const cr = alloc.create(CompiledRegex) catch return null;
-    cr.simple_prefix = detectSimplePrefix(pattern_str);
+    cr.simple_prefix = detectSimplePrefix(pattern_str) orelse detectEscapedPrefix(alloc, pattern_str);
     cr.is_identifier = isIdentifierPattern(pattern_str);
     cr.char_class = null;
     cr.char_class_mode = .first_char;
@@ -2784,6 +2784,38 @@ fn detectSimplePrefix(pattern: []const u8) ?[]const u8 {
         }
     }
     return rest;
+}
+
+/// Detect an escaped literal prefix from a regex pattern.
+/// E.g., `^\$\{\{` → prefix = "${{" (3 bytes).
+/// Returns the literal prefix or null if not detectable.
+fn detectEscapedPrefix(alloc: Allocator, pattern: []const u8) ?[]const u8 {
+    if (pattern.len < 4 or pattern[0] != '^') return null;
+    var buf = std.ArrayList(u8).init(alloc);
+    var i: usize = 1;
+    while (i < pattern.len) {
+        const ch = pattern[i];
+        if (ch == '\\' and i + 1 < pattern.len) {
+            const next = pattern[i + 1];
+            switch (next) {
+                '$', '{', '}', '(', ')', '[', ']', '.', '*', '+', '?', '|', '^', '\\' => {
+                    buf.append(next) catch return null;
+                    i += 2;
+                },
+                else => break, // unknown escape
+            }
+        } else {
+            switch (ch) {
+                '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '$' => break, // metachar
+                else => {
+                    buf.append(ch) catch return null;
+                    i += 1;
+                },
+            }
+        }
+    }
+    if (buf.items.len >= 2) return buf.toOwnedSlice() catch null;
+    return null;
 }
 
 /// Check if a string matches the identifier pattern ^[_a-zA-Z][a-zA-Z0-9_-]*$
