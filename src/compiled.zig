@@ -452,7 +452,13 @@ pub const CompiledNode = struct {
         if (self.simple_type != .none) {
             return Validator.matchesSimpleType(instance, self.simple_type);
         }
-        if (self.ref_overrides) return null;
+        if (self.ref_overrides) {
+            // Follow pre-linked ref_local if available
+            if (self.validators.len == 1) {
+                return isValidatorValid(self.validators[0], instance, compiled);
+            }
+            return null;
+        }
         // Unrolled loop for small validator counts (avoids loop overhead)
         const validators = self.validators;
         switch (validators.len) {
@@ -1342,6 +1348,21 @@ fn compileNode(
             var validators = std.ArrayList(CompiledValidator).init(alloc);
             if (!ref_overrides) {
                 compileKeywords(alloc, obj, root_schema, &validators, validation_vocab_disabled, node_map, is_2020, regex_list);
+            } else {
+                // ref_overrides: only compile $ref as ref_local for direct target access
+                if (obj.get("$ref")) |kv| {
+                    const ref_str = switch (kv) { .string => |s| s, else => null };
+                    if (ref_str) |rs| {
+                        if (rs.len > 0 and rs[0] == '#') {
+                            var resolved: ?std.json.Value = null;
+                            if (rs.len == 1) resolved = root_schema
+                            else if (rs.len >= 2 and rs[1] == '/') resolved = @import("schema_registry.zig").resolvePointer(root_schema, rs[2..]);
+                            if (resolved) |r| validators.append(.{ .ref_local = linkSchema(node_map, r) }) catch {};
+                        }
+                    }
+                }
+            }
+            if (!ref_overrides) {
                 // Post-process: merge type_single(.object) + required + properties_compiled + additional_properties_false
                 // into a single object_fast validator to reduce hashmap lookups
                 tryMergeObjectFast(alloc, &validators);
