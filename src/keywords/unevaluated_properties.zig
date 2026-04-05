@@ -422,8 +422,11 @@ fn getCompiledPatternProperties(ctx: Context, schema: std.json.Value) ?[]const c
     const comp = ctx.compiled orelse return null;
     const node = comp.getNode(schema) orelse return null;
     for (node.validators) |v| {
-        switch (v) {
-            .pattern_properties_compiled => |pp| return pp,
+        switch (v.tag) {
+            .pattern_properties_compiled => {
+                const w: *const compiled_mod.CompiledValidator.PatternPropertySliceWrapper = v.getData(*const compiled_mod.CompiledValidator.PatternPropertySliceWrapper);
+                return w.items;
+            },
             else => {},
         }
     }
