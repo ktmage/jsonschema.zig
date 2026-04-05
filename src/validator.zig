@@ -167,24 +167,40 @@ pub const Context = struct {
         sub_schema: std.json.Value,
         instance: std.json.Value,
     ) bool {
-        // Fast path: compiled schemas
         if (self.compiled) |compiled| {
             switch (sub_schema) {
                 .bool => |b| return b,
                 .object => {
-                    if (compiled.getNode(sub_schema)) |node| {
-                        const can_skip = !node.needs_uri_resolution or
-                            (!node.has_id and self.registry == null);
+                    const node = compiled.getNode(sub_schema);
+                    if (node) |n| {
+                        const can_skip = !n.needs_uri_resolution or
+                            (!n.has_id and self.registry == null);
                         if (can_skip) {
-                            if (node.isValidFast(instance, compiled)) |result| return result;
+                            if (n.isValidFast(instance, compiled)) |result| return result;
                         }
+                    }
+                    // Compiled direct path: skip validateFull overhead
+                    if (self.registry == null) {
+                        var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                        const child = Context{
+                            .allocator = self.allocator,
+                            .root_schema = self.root_schema,
+                            .schema = sub_schema,
+                            .instance = instance,
+                            .instance_path = "",
+                            .schema_path = "",
+                            .errors = &errors,
+                            .compiled = self.compiled,
+                            .compiled_node = node,
+                        };
+                        validateAll(child);
+                        return errors.items.len == 0;
                     }
                 },
                 else => return true,
             }
         }
 
-        // Slow path: full validation with proper URI resolution
         const result = jsonschema.validateFull(
             self.allocator,
             self.root_schema,
@@ -218,6 +234,23 @@ pub const Context = struct {
                         if (can_skip) {
                             if (n.isValidFast(instance, compiled)) |result| return result;
                         }
+                    }
+                    // Compiled direct path
+                    if (self.registry == null) {
+                        var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                        const child = Context{
+                            .allocator = self.allocator,
+                            .root_schema = self.root_schema,
+                            .schema = sub_schema,
+                            .instance = instance,
+                            .instance_path = "",
+                            .schema_path = "",
+                            .errors = &errors,
+                            .compiled = self.compiled,
+                            .compiled_node = node,
+                        };
+                        validateAll(child);
+                        return errors.items.len == 0;
                     }
                 },
                 else => return true,
