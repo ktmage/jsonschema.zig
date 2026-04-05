@@ -1723,11 +1723,22 @@ fn compileKeywords(
         } }) catch {};
     }
     if (obj.get("unevaluatedItems")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/unevaluated_items.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "unevaluatedItems",
-        } }) catch {};
+        // If items (single schema, not array) exists, it evaluates ALL items.
+        // unevaluatedItems: false is therefore redundant.
+        const has_items_single = if (obj.get("items")) |iv| switch (iv) {
+            .object, .bool => true,
+            else => false,
+        } else false;
+        const is_false = kv == .bool and !kv.bool;
+        if (has_items_single and is_false) {
+            // Skip — items covers all elements, unevaluatedItems: false is no-op
+        } else {
+            validators.append(.{ .generic = .{
+                .func = @import("keywords/unevaluated_items.zig").validate,
+                .keyword_value = kv,
+                .keyword_name = "unevaluatedItems",
+            } }) catch {};
+        }
     }
 }
 
