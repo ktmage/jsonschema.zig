@@ -539,12 +539,8 @@ pub fn validateAll(ctx: Context) void {
                         }
                     },
                     .unique_items => {
-                        // Should not happen (compiled as generic), but handle gracefully
-                        continue;
-                    },
-                    .contains => {
-                        // Should not happen (compiled as generic), but handle gracefully
-                        continue;
+                        // Handled by isValidFast; validateAll only reached for errors
+                        @import("keywords/unique_items.zig").validate(ctx);
                     },
                     .required => |names| {
                         const obj = switch (ctx.instance) {

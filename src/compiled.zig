@@ -184,7 +184,6 @@ pub const CompiledValidator = union(enum) {
     min_items: u64,
     max_items: u64,
     unique_items: void,
-    contains: std.json.Value,
 
     // Object
     required: []const []const u8,
@@ -495,8 +494,20 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             };
             return arr.len <= limit;
         },
-        .unique_items => return null, // expensive, use generic path
-        .contains => return null, // needs sub-schema validation
+        .unique_items => {
+            const arr = switch (instance) {
+                .array => |a| a.items,
+                else => return true,
+            };
+            // O(n²) but needed for correctness
+            if (arr.len <= 1) return true;
+            for (0..arr.len - 1) |i| {
+                for (i + 1..arr.len) |j| {
+                    if (@import("keywords/enum_keyword.zig").jsonEqual(arr[i], arr[j])) return false;
+                }
+            }
+            return true;
+        },
         .required => |names| {
             const obj = switch (instance) {
                 .object => |o| o,
@@ -1059,7 +1070,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
     if (node.simple_type != .none) return true;
     for (node.validators) |v| {
         switch (v) {
-            .generic, .pattern, .unique_items, .pattern_properties_compiled => return false,
+            .generic, .pattern, .pattern_properties_compiled => return false,
             else => {},
         }
     }
