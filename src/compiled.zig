@@ -1466,8 +1466,10 @@ fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *c
     if (ls.node) |node| {
         if (node.always_valid) return true;
         if (node.simple_type != .none) return Validator.matchesSimpleType(instance, node.simple_type);
-        // Note: has_id check removed — isValidFast handles $id-bearing nodes
-        // correctly when called from compiled path (no registry needed)
+        // Fast path: 1-validator nodes skip isValidFast loop setup
+        if (node.validators.len == 1 and !node.ref_overrides) {
+            return node.validators[0].isValid_fn(node.validators[0].data, instance, compiled);
+        }
         return node.isValidFast(instance, compiled);
     }
     return switch (ls.value) {
