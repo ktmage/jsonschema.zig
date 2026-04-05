@@ -1438,7 +1438,24 @@ fn compileNode(
                 switch (final_validators[0]) {
                     .ref_local => |ls| {
                         if (ls.node) |target| {
-                            if (target.simple_type != .none) effective_simple_type = target.simple_type;
+                            if (target.simple_type != .none) {
+                                effective_simple_type = target.simple_type;
+                            } else {
+                                // Check if target has object_fast (implies .object type)
+                                for (target.validators) |tv| {
+                                    switch (tv) {
+                                        .object_fast => |of| {
+                                            if (of.has_type_object) effective_simple_type = .object;
+                                            break;
+                                        },
+                                        .type_single => |st| {
+                                            effective_simple_type = st;
+                                            break;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                            }
                             if (target.always_valid) effective_always_valid = true;
                         }
                     },
