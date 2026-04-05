@@ -285,6 +285,8 @@ pub const CompiledRegex = struct {
     /// Fast bitmap-based character class pattern
     char_class: ?CharBitmap = null,
     char_class_mode: CharClassMode = .first_char,
+    /// Literal string set for patterns like ^(foo|bar)$ (max 8 alternatives)
+    literal_set: ?[]const []const u8 = null,
 
     /// Check if a string matches this compiled pattern.
     pub fn matches(self: *const CompiledRegex, str: []const u8, allocator: ?std.mem.Allocator) bool {
@@ -1083,7 +1085,7 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             };
             // Only handle if all patterns can be matched without allocation
             for (pp_entries) |pp_entry| {
-                if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and pp_entry.regex.char_class == null) return null;
+                if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and pp_entry.regex.char_class == null and pp_entry.regex.literal_set == null) return null;
             }
             const keys = obj.keys();
             const vals = obj.values();
@@ -1095,7 +1097,12 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
                         matchesIdentifierPattern(key)
                     else if (pp_entry.regex.char_class) |bm|
                         matchesCharClass(key, bm, pp_entry.regex.char_class_mode)
-                    else
+                    else if (pp_entry.regex.literal_set) |lset| blk: {
+                        for (lset) |lit| {
+                            if (key.len == lit.len and std.mem.eql(u8, key, lit)) break :blk true;
+                        }
+                        break :blk false;
+                    } else
                         false;
                     if (matched) {
                         const result = validateLinkedSchema(pp_entry.schema, val, compiled) orelse return null;
@@ -2357,10 +2364,13 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     cr.is_identifier = isIdentifierPattern(pattern_str);
     cr.char_class = null;
     cr.char_class_mode = .first_char;
+    cr.literal_set = null;
     if (cr.simple_prefix == null and !cr.is_identifier) {
         if (detectCharClass(pattern_str)) |cc| {
             cr.char_class = cc.bitmap;
             cr.char_class_mode = cc.mode;
+        } else if (detectLiteralSet(alloc, pattern_str)) |lset| {
+            cr.literal_set = lset;
         }
     }
     const pattern_z = alloc.dupeZ(u8, pattern_str) catch return null;
@@ -2394,6 +2404,57 @@ fn matchesCharClass(s: []const u8, bm: CharBitmap, mode: CharClassMode) bool {
 }
 
 /// Parse a character class from a regex pattern like ^[a-z_]+$ and return a bitmap.
+/// Detect anchored alternation patterns and expand to literal string set.
+/// Handles: ^(foo|bar)$, ^prefix(a|b)suffix$, ^prefix(a|b)?suffix$
+fn detectLiteralSet(alloc: Allocator, pattern: []const u8) ?[]const []const u8 {
+    if (pattern.len < 5 or pattern[0] != '^' or pattern[pattern.len - 1] != '$') return null;
+    const inner = pattern[1 .. pattern.len - 1];
+
+    // Find ( and )
+    var paren_open: ?usize = null;
+    var paren_close: ?usize = null;
+    for (inner, 0..) |ch, i| {
+        if (ch == '(' and paren_open == null) { paren_open = i; }
+        else if (ch == ')' and paren_open != null and paren_close == null) { paren_close = i; }
+        else if (ch == '(' or ch == ')') return null; // nested/extra parens
+    }
+    const po = paren_open orelse return null;
+    const pc = paren_close orelse return null;
+
+    const prefix = inner[0..po];
+    const group = inner[po + 1 .. pc];
+    const after_close = inner[pc + 1 ..];
+
+    // Check if group is optional (? after close paren)
+    var is_optional = false;
+    var suffix = after_close;
+    if (after_close.len > 0 and after_close[0] == '?') {
+        is_optional = true;
+        suffix = after_close[1..];
+    }
+
+    // Verify prefix and suffix are literal (no metacharacters)
+    for (prefix) |ch| { switch (ch) { '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null, else => {} } }
+    for (suffix) |ch| { switch (ch) { '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null, else => {} } }
+
+    var alternatives = std.ArrayList([]const u8).init(alloc);
+
+    // Add prefix+suffix (no group) if optional
+    if (is_optional) {
+        alternatives.append(std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, suffix }) catch return null) catch return null;
+    }
+
+    // Split group by | and build each alternative
+    var it = std.mem.splitScalar(u8, group, '|');
+    while (it.next()) |alt| {
+        for (alt) |ch| { switch (ch) { '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '\\' => return null, else => {} } }
+        alternatives.append(std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ prefix, alt, suffix }) catch return null) catch return null;
+    }
+
+    if (alternatives.items.len < 2 or alternatives.items.len > 16) return null;
+    return alternatives.toOwnedSlice() catch null;
+}
+
 fn detectCharClass(pattern: []const u8) ?struct { bitmap: CharBitmap, mode: CharClassMode } {
     if (pattern.len < 4 or pattern[0] != '^' or pattern[1] != '[') return null;
 
