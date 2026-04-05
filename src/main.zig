@@ -68,6 +68,13 @@ pub fn isValidCompiled(
     // Pre-allocate 1 slot so bool_only sentinel can set items.len = 1
     errors.ensureTotalCapacity(1) catch {};
 
+    // Dynamic scope for $dynamicRef resolution (Draft 2020-12)
+    var dynamic_scope = std.ArrayList(Validator.DynamicScopeEntry).init(allocator);
+    defer dynamic_scope.deinit();
+    // Push root schema to dynamic scope (needed for $dynamicRef/$dynamicAnchor)
+    const root_id = if (schema.object.get("$id")) |id_val| switch (id_val) { .string => |s| s, else => "" } else "";
+    dynamic_scope.append(.{ .base_uri = root_id, .schema = schema }) catch {};
+
     const ctx = Validator.Context{
         .allocator = allocator,
         .root_schema = schema,
@@ -79,7 +86,7 @@ pub fn isValidCompiled(
         .registry = null,
         .base_uri = "",
         .ref_base_uri = "",
-        .dynamic_scope = null,
+        .dynamic_scope = &dynamic_scope,
         .compiled = compiled,
         .compiled_node = compiled.getNode(schema),
         .bool_only = true,
