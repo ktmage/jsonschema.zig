@@ -252,6 +252,9 @@ pub const CompiledValidator = union(enum) {
         all_covered: bool,
     },
 
+    // Compiled dependentRequired: trigger property → required property names
+    dependent_required_compiled: []const DependentRequiredEntry,
+
     // Compiled dependentSchemas: trigger property name → linked schema
     dependent_schemas_compiled: []const DependentSchemaEntry,
 
@@ -313,6 +316,12 @@ pub const PatternPropertyEntry = struct {
     regex: *CompiledRegex,
     schema: LinkedSchema,
     pattern: []const u8,
+};
+
+/// Compiled dependentRequired entry: trigger → required names.
+pub const DependentRequiredEntry = struct {
+    trigger: []const u8,
+    required: []const []const u8,
 };
 
 /// Compiled dependentSchemas entry: trigger property + linked schema.
@@ -802,6 +811,20 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 return c.regexec(&cr.regex, ptr, 0, null, 0) == 0;
             }
             return null; // can't null-terminate without allocating
+        },
+        .dependent_required_compiled => |deps| {
+            const obj = switch (instance) {
+                .object => |o| o,
+                else => return true,
+            };
+            for (deps) |dep| {
+                if (obj.get(dep.trigger) != null) {
+                    for (dep.required) |req| {
+                        if (obj.get(req) == null) return false;
+                    }
+                }
+            }
+            return true;
         },
         .contains_compiled => |cc| {
             const arr = switch (instance) {
@@ -1630,11 +1653,26 @@ fn compileKeywords(
     }
     if (obj.get("dependentRequired")) |kv| {
         if (!validation_vocab_disabled) {
-            validators.append(.{ .generic = .{
-                .func = @import("keywords/dependent_required.zig").validate,
-                .keyword_value = kv,
-                .keyword_name = "dependentRequired",
-            } }) catch {};
+            if (kv == .object) {
+                const DREntry = DependentRequiredEntry;
+                var dr_entries = std.ArrayList(DREntry).init(alloc);
+                var dr_it = kv.object.iterator();
+                while (dr_it.next()) |dr_entry| {
+                    if (dr_entry.value_ptr.* == .array) {
+                        var req_names = std.ArrayList([]const u8).init(alloc);
+                        for (dr_entry.value_ptr.*.array.items) |item| {
+                            if (item == .string) req_names.append(item.string) catch {};
+                        }
+                        dr_entries.append(.{
+                            .trigger = dr_entry.key_ptr.*,
+                            .required = req_names.toOwnedSlice() catch &.{},
+                        }) catch {};
+                    }
+                }
+                if (dr_entries.items.len > 0) {
+                    validators.append(.{ .dependent_required_compiled = dr_entries.toOwnedSlice() catch &.{} }) catch {};
+                }
+            }
         }
     }
     if (obj.get("dependentSchemas")) |kv| {

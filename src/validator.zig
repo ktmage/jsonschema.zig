@@ -1126,6 +1126,22 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("pattern", "String does not match pattern");
                         }
                     },
+                    .dependent_required_compiled => |deps| {
+                        const dr_obj = switch (ctx.instance) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        for (deps) |dep| {
+                            if (dr_obj.get(dep.trigger) != null) {
+                                for (dep.required) |req| {
+                                    if (dr_obj.get(req) == null) {
+                                        const msg = std.fmt.allocPrint(ctx.allocator, "Property '{s}' depends on '{s}' which is missing", .{ dep.trigger, req }) catch continue;
+                                        ctx.addError("dependentRequired", msg);
+                                    }
+                                }
+                            }
+                        }
+                    },
                     .contains_compiled => |cc| {
                         const c_arr = switch (ctx.instance) {
                             .array => |a| a,
