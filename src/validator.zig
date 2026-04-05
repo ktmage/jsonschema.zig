@@ -611,20 +611,28 @@ pub fn validateAll(ctx: Context) void {
                         }
                     },
                     .all_of_compiled => |schemas| {
-                        // Inline fast path: use pre-linked schemas
-                        var need_slow = false;
+                        // Per-branch fast path: try isValidFast, fallback per branch
+                        var any_failed = false;
                         for (schemas) |s| {
                             if (s.node) |snode| {
-                                if (!snode.needs_uri_resolution) {
+                                const can_skip = !snode.needs_uri_resolution or
+                                    (!snode.has_id and ctx.registry == null);
+                                if (can_skip) {
                                     if (snode.isValidFast(ctx.instance, compiled)) |result| {
                                         if (result) continue;
+                                        any_failed = true;
+                                        break;
                                     }
                                 }
                             }
-                            need_slow = true;
-                            break;
+                            // This branch can't be inlined — use boolean check
+                            if (!ctx.isSubschemaValidWithNode(s.value, ctx.instance, s.node)) {
+                                any_failed = true;
+                                break;
+                            }
                         }
-                        if (need_slow) {
+                        if (any_failed) {
+                            // Re-validate for error collection
                             var child = ctx;
                             child.current_keyword_value = null;
                             child.compiled_node = null;
@@ -713,30 +721,28 @@ pub fn validateAll(ctx: Context) void {
                         }
                     },
                     .any_of_compiled => |schemas| {
-                        // Inline fast path
+                        // Per-branch fast path
+                        const inst_mask = compiled_mod.typeMaskForValue(ctx.instance);
                         var found = false;
-                        var need_slow = false;
                         for (schemas) |s| {
+                            if (s.type_mask & inst_mask == 0) continue;
                             if (s.node) |snode| {
-                                if (!snode.needs_uri_resolution) {
+                                const can_skip = !snode.needs_uri_resolution or
+                                    (!snode.has_id and ctx.registry == null);
+                                if (can_skip) {
                                     if (snode.isValidFast(ctx.instance, compiled)) |result| {
-                                        if (result) {
-                                            found = true;
-                                            break;
-                                        }
+                                        if (result) { found = true; break; }
                                         continue;
                                     }
                                 }
                             }
-                            need_slow = true;
-                            break;
+                            // Can't inline — use boolean check
+                            if (ctx.isSubschemaValidWithNode(s.value, ctx.instance, s.node)) {
+                                found = true;
+                                break;
+                            }
                         }
-                        if (!found and need_slow) {
-                            var child = ctx;
-                            child.current_keyword_value = null;
-                            child.compiled_node = null;
-                            @import("keywords/any_of.zig").validate(child);
-                        } else if (!found and !need_slow) {
+                        if (!found) {
                             ctx.addError("anyOf", "Instance does not match any schema in anyOf");
                         }
                     },
