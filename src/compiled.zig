@@ -404,16 +404,32 @@ pub const CompiledNode = struct {
     unevaluated_pattern_regexes: ?[]*CompiledRegex = null,
 
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
-    /// Returns false on first failure. Only works for common keyword patterns;
-    /// falls back to full validation for complex keywords.
-    /// Returns null if this node has keywords that can't be inlined (caller must use FBA fallback).
     pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
         if (self.always_valid) return true;
         if (self.simple_type != .none) {
             return Validator.matchesSimpleType(instance, self.simple_type);
         }
-        if (self.ref_overrides) return null; // can't inline $ref
-        for (self.validators) |v| {
+        if (self.ref_overrides) return null;
+        // Unrolled loop for small validator counts (avoids loop overhead)
+        const validators = self.validators;
+        switch (validators.len) {
+            0 => return true,
+            1 => return isValidatorValid(validators[0], instance, compiled),
+            2 => {
+                const r0 = isValidatorValid(validators[0], instance, compiled) orelse return null;
+                if (!r0) return false;
+                return isValidatorValid(validators[1], instance, compiled);
+            },
+            3 => {
+                const r0 = isValidatorValid(validators[0], instance, compiled) orelse return null;
+                if (!r0) return false;
+                const r1 = isValidatorValid(validators[1], instance, compiled) orelse return null;
+                if (!r1) return false;
+                return isValidatorValid(validators[2], instance, compiled);
+            },
+            else => {},
+        }
+        for (validators) |v| {
             const result = isValidatorValid(v, instance, compiled) orelse return null;
             if (!result) return false;
         }
