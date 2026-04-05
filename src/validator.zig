@@ -736,7 +736,7 @@ pub fn validateAll(ctx: Context) void {
                                 }
                             }
                         }
-                        // Non-discriminator: inline fast path with type mask
+                        // Non-discriminator: per-branch evaluation with type mask
                         const inst_mask = compiled_mod.typeMaskForValue(ctx.instance);
                         var fast_ok = true;
                         var match_count: usize = 0;
@@ -748,6 +748,14 @@ pub fn validateAll(ctx: Context) void {
                                 if (can_skip_o) {
                                     if (snode.isValidFast(ctx.instance, compiled)) |result| {
                                         if (result) {
+                                            match_count += 1;
+                                            if (match_count > 1) break;
+                                        }
+                                        continue;
+                                    }
+                                    // isValidFast null — use compiled boolean path
+                                    if (ctx.registry == null) {
+                                        if (ctx.isSubschemaValidWithNode(s.value, ctx.instance, snode)) {
                                             match_count += 1;
                                             if (match_count > 1) break;
                                         }
