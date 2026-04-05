@@ -172,9 +172,37 @@ pub const FastRegex = struct {
             stack_len -= 1;
             const bt = stack[stack_len];
             pos = bt.pos;
-            oi = bt.op_idx + 1; // continue with next op from backtracked position
+            oi = bt.op_idx + 1;
 
-            // If we can backtrack further (pos > greedy_start), push another entry
+            // Smart backtrack: if the next op is a literal, scan backward for it
+            // This turns O(n) backtrack steps into O(1) for literal-after-greedy patterns
+            if (oi < ops.len and ops[oi].kind == .literal and ops[oi].min >= 1) {
+                const lit = ops[oi].kind.literal;
+                if (input[pos] != lit) {
+                    // Current pos doesn't match literal — scan backward
+                    var scan_pos = pos;
+                    while (scan_pos > bt.greedy_start) {
+                        scan_pos -= 1;
+                        if (input[scan_pos] == lit) break;
+                    } else {
+                        // Literal not found in range — this backtrack point is exhausted
+                        continue; // try next backtrack entry
+                    }
+                    // Found literal at scan_pos — update pos and push further backtrack
+                    pos = scan_pos;
+                    if (pos > bt.greedy_start and stack_len < 64) {
+                        stack[stack_len] = .{
+                            .op_idx = bt.op_idx,
+                            .pos = @intCast(pos - 1),
+                            .greedy_start = bt.greedy_start,
+                        };
+                        stack_len += 1;
+                    }
+                    continue; // retry with new pos
+                }
+            }
+
+            // Standard backtrack: push one-less entry
             if (pos > bt.greedy_start and stack_len < 64) {
                 stack[stack_len] = .{
                     .op_idx = bt.op_idx,
