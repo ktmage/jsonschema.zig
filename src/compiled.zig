@@ -166,6 +166,8 @@ pub const CompiledValidator = union(enum) {
     type_single: SimpleType,
     type_multi: []const SimpleType,
     enum_check: std.json.Value,
+    /// Pre-built string hashset for large string-only enums (O(1) lookup)
+    enum_string_set: *std.StringHashMap(void),
     const_check: std.json.Value,
 
     // Numeric
@@ -487,6 +489,13 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
                 if (@import("keywords/enum_keyword.zig").jsonEqual(instance, candidate)) return true;
             }
             return false;
+        },
+        .enum_string_set => |set| {
+            const str = switch (instance) {
+                .string => |s| s,
+                else => return false,
+            };
+            return set.get(str) != null;
         },
         .const_check => |const_val| {
             return @import("keywords/enum_keyword.zig").jsonEqual(instance, const_val);
@@ -1449,7 +1458,28 @@ fn compileKeywords(
     }
     if (obj.get("enum")) |kv| {
         if (!validation_vocab_disabled) {
-            validators.append(.{ .enum_check = kv }) catch {};
+            // For large string-only enums, use hashset for O(1) lookup
+            const use_hashset = blk: {
+                const arr = switch (kv) { .array => |a| a, else => break :blk false };
+                if (arr.items.len < 8) break :blk false;
+                for (arr.items) |item| {
+                    if (item != .string) break :blk false;
+                }
+                break :blk true;
+            };
+            if (use_hashset) {
+                if (alloc.create(std.StringHashMap(void))) |hm| {
+                    hm.* = std.StringHashMap(void).init(alloc);
+                    for (kv.array.items) |item| {
+                        hm.put(item.string, {}) catch {};
+                    }
+                    validators.append(.{ .enum_string_set = hm }) catch {};
+                } else |_| {
+                    validators.append(.{ .enum_check = kv }) catch {};
+                }
+            } else {
+                validators.append(.{ .enum_check = kv }) catch {};
+            }
         }
     }
     if (obj.get("const")) |kv| {

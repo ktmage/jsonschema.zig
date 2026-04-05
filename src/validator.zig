@@ -485,6 +485,18 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("enum", "Instance does not match any enum value");
                         }
                     },
+                    .enum_string_set => |set| {
+                        const str = switch (ctx.instance) {
+                            .string => |s| s,
+                            else => {
+                                ctx.addError("enum", "Instance does not match any enum value");
+                                continue;
+                            },
+                        };
+                        if (set.get(str) == null) {
+                            ctx.addError("enum", "Instance does not match any enum value");
+                        }
+                    },
                     .const_check => |const_val| {
                         if (!@import("keywords/enum_keyword.zig").jsonEqual(ctx.instance, const_val)) {
                             ctx.addError("const", "Instance does not match the const value");
