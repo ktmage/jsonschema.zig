@@ -136,7 +136,25 @@ pub const Context = struct {
                                 .allocator = self.allocator,
                             };
                         }
-                        // needs_uri_resolution — fall through to slow path
+                        // needs_uri_resolution with $id — may need slow path
+                    } else if (self.registry == null) {
+                        // No registry: use compiled direct path even without node
+                        var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                        const child = Context{
+                            .allocator = self.allocator,
+                            .root_schema = self.root_schema,
+                            .schema = sub_schema,
+                            .instance = instance,
+                            .instance_path = instance_path,
+                            .schema_path = schema_path,
+                            .errors = &errors,
+                            .compiled = self.compiled,
+                        };
+                        validateAll(child);
+                        if (errors.items.len == 0) {
+                            return .{ .errors = &.{}, .allocator = self.allocator };
+                        }
+                        return .{ .errors = errors.toOwnedSlice() catch &.{}, .allocator = self.allocator };
                     }
                 },
                 else => {
