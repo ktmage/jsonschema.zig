@@ -1210,6 +1210,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
 fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     if (ls.node) |node| {
         if (node.always_valid) return true;
+        if (node.simple_type != .none) return Validator.matchesSimpleType(instance, node.simple_type);
         if (node.has_id) return null;
         return node.isValidFast(instance, compiled);
     }
