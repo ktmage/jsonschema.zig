@@ -254,6 +254,16 @@ pub const CompiledValidator = union(enum) {
     // Compiled propertyNames: linked schema to validate property names against
     property_names_compiled: LinkedSchema,
 
+    // Compiled contains with pre-extracted min/max and pre-linked schema
+    contains_compiled: struct {
+        schema: LinkedSchema,
+        min_contains: usize,
+        max_contains: ?usize,
+    },
+
+    // Compiled prefixItems with pre-linked schemas
+    prefix_items_compiled: []const LinkedSchema,
+
     // Pre-compiled regex pattern (stores pointer to arena-allocated CompiledRegex)
     pattern_compiled: *CompiledRegex,
 
@@ -714,6 +724,35 @@ fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *c
             }
             return null; // can't null-terminate without allocating
         },
+        .contains_compiled => |cc| {
+            const arr = switch (instance) {
+                .array => |a| a.items,
+                else => return true,
+            };
+            var match_count: usize = 0;
+            for (arr) |item| {
+                if (validateLinkedSchema(cc.schema, item, compiled)) |result| {
+                    if (result) match_count += 1;
+                } else return null;
+            }
+            if (match_count < cc.min_contains) return false;
+            if (cc.max_contains) |max| {
+                if (match_count > max) return false;
+            }
+            return true;
+        },
+        .prefix_items_compiled => |schemas| {
+            const arr = switch (instance) {
+                .array => |a| a.items,
+                else => return true,
+            };
+            const count = @min(arr.len, schemas.len);
+            for (0..count) |i| {
+                const result = validateLinkedSchema(schemas[i], arr[i], compiled) orelse return null;
+                if (!result) return false;
+            }
+            return true;
+        },
         .dependent_schemas_compiled => |deps| {
             const obj = switch (instance) {
                 .object => |o| o,
@@ -990,7 +1029,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
     if (node.simple_type != .none) return true;
     for (node.validators) |v| {
         switch (v) {
-            .generic, .pattern, .unique_items, .contains, .pattern_properties_compiled => return false,
+            .generic, .pattern, .unique_items, .pattern_properties_compiled => return false,
             else => {},
         }
     }
@@ -1245,11 +1284,12 @@ fn compileKeywords(
 
     // Array
     if (obj.get("prefixItems")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/prefix_items.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "prefixItems",
-        } }) catch {};
+        switch (kv) {
+            .array => |arr| {
+                validators.append(.{ .prefix_items_compiled = linkSchemaArray(alloc, node_map, arr.items) }) catch {};
+            },
+            else => {},
+        }
     }
     if (obj.get("items")) |kv| {
         switch (kv) {
@@ -1310,10 +1350,18 @@ fn compileKeywords(
         }
     }
     if (obj.get("contains")) |kv| {
-        validators.append(.{ .generic = .{
-            .func = @import("keywords/contains.zig").validate,
-            .keyword_value = kv,
-            .keyword_name = "contains",
+        const min_c: usize = if (obj.get("minContains")) |mc| switch (mc) {
+            .integer => |n| if (n >= 0) @intCast(n) else 1,
+            else => 1,
+        } else 1;
+        const max_c: ?usize = if (obj.get("maxContains")) |mc| switch (mc) {
+            .integer => |n| if (n >= 0) @as(?usize, @intCast(n)) else null,
+            else => null,
+        } else null;
+        validators.append(.{ .contains_compiled = .{
+            .schema = linkSchema(node_map, kv),
+            .min_contains = min_c,
+            .max_contains = max_c,
         } }) catch {};
     }
 

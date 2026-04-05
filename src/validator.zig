@@ -1044,6 +1044,65 @@ pub fn validateAll(ctx: Context) void {
                             ctx.addError("pattern", "String does not match pattern");
                         }
                     },
+                    .contains_compiled => |cc| {
+                        const c_arr = switch (ctx.instance) {
+                            .array => |a| a,
+                            else => continue,
+                        };
+                        var match_count: usize = 0;
+                        for (c_arr.items) |item| {
+                            if (cc.schema.node) |cnode| {
+                                const can_skip_c = !cnode.needs_uri_resolution or
+                                    (!cnode.has_id and ctx.registry == null);
+                                if (can_skip_c) {
+                                    if (cnode.isValidFast(item, compiled)) |result| {
+                                        if (result) { match_count += 1; continue; }
+                                        continue;
+                                    }
+                                }
+                            }
+                            if (ctx.isSubschemaValidWithNode(cc.schema.value, item, cc.schema.node)) {
+                                match_count += 1;
+                            }
+                        }
+                        if (match_count < cc.min_contains) {
+                            ctx.addError(if (cc.min_contains > 1) "minContains" else "contains", "Not enough items match the contains schema");
+                        }
+                        if (cc.max_contains) |max| {
+                            if (match_count > max) {
+                                ctx.addError("maxContains", "Too many items match the contains schema");
+                            }
+                        }
+                    },
+                    .prefix_items_compiled => |schemas| {
+                        const pi_arr = switch (ctx.instance) {
+                            .array => |a| a,
+                            else => continue,
+                        };
+                        const count = @min(pi_arr.items.len, schemas.len);
+                        var all_valid = true;
+                        for (0..count) |i| {
+                            if (schemas[i].node) |pnode| {
+                                const can_skip_p = !pnode.needs_uri_resolution or
+                                    (!pnode.has_id and ctx.registry == null);
+                                if (can_skip_p) {
+                                    if (pnode.isValidFast(pi_arr.items[i], compiled)) |result| {
+                                        if (result) continue;
+                                    }
+                                }
+                            }
+                            if (ctx.isSubschemaValidWithNode(schemas[i].value, pi_arr.items[i], schemas[i].node)) continue;
+                            all_valid = false;
+                            break;
+                        }
+                        if (!all_valid) {
+                            // Slow path for error details
+                            var child = ctx;
+                            child.current_keyword_value = null;
+                            child.compiled_node = null;
+                            @import("keywords/prefix_items.zig").validate(child);
+                        }
+                    },
                     .dependent_schemas_compiled => |deps| {
                         const ds_obj = switch (ctx.instance) {
                             .object => |o| o,
