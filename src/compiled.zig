@@ -373,14 +373,7 @@ pub const CompiledRegex = struct {
         // Fast path: literal string set (case-insensitive, lowercase stored)
         if (self.literal_set) |lset| {
             for (lset) |lit| {
-                if (str.len == lit.len) {
-                    var match = true;
-                    for (str, lit) |a, b| {
-                        const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
-                        if (al != b) { match = false; break; }
-                    }
-                    if (match) return true;
-                }
+                if (str.len == lit.len and std.mem.eql(u8, str, lit)) return true;
             }
             return false;
         }
@@ -808,7 +801,8 @@ fn jsonValueHashFast(val: std.json.Value) u64 {
     return switch (val) {
         .null => 0x1234567890abcdef,
         .bool => |b| if (b) @as(u64, 1) else @as(u64, 0),
-        .integer => |n| @bitCast(@as(i64, n)),
+        // Normalize: 1 and 1.0 must hash the same (JSON Schema equality)
+        .integer => |n| @bitCast(@as(f64, @floatFromInt(n))),
         .float => |f| @bitCast(f),
         .string => |s| blk: {
             var h: u64 = 0xcbf29ce484222325 +% @as(u64, s.len);
@@ -1042,7 +1036,7 @@ fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Valu
     if (of.property_map) |pmap| {
         for (keys, vals) |key, val| {
             if (pmap.get(key)) |pi| {
-                found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                if (pi < 64) found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
                 const ls = of.properties[pi].schema;
                 if (ls.node) |n| {
                     if (n.always_valid) continue;
@@ -1071,7 +1065,7 @@ fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Valu
             var matched = false;
             for (of.properties, 0..) |entry, pi| {
                 if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
-                    found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
+                    if (pi < 64) found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
                     if (entry.schema.node) |n| {
                         if (n.always_valid) { matched = true; break; }
                         if (n.simple_type != .none) {
@@ -1225,17 +1219,10 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
         return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
     }
     if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
-    // Fast path: literal string set (case-insensitive, lowercase stored)
+    // Fast path: literal string set
     if (cr.literal_set) |lset| {
         for (lset) |lit| {
-            if (instance_str.len == lit.len) {
-                var match = true;
-                for (instance_str, lit) |a, b| {
-                    const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
-                    if (al != b) { match = false; break; }
-                }
-                if (match) return true;
-            }
+            if (instance_str.len == lit.len and std.mem.eql(u8, instance_str, lit)) return true;
         }
         return false;
     }
@@ -3135,9 +3122,8 @@ fn expandInto(alloc: Allocator, result: *std.ArrayList([]const u8), pat: []const
         } else if (ch == '.' or ch == '*' or ch == '+' or ch == '?' or ch == '{' or ch == '}' or ch == '\\') {
             return false;
         } else {
-            // Literal character
-            const lc = if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
-            appendCharToAll(alloc, result, lc) orelse return false;
+            // Literal character — preserve case (only [Xx] pairs are case-folded)
+            appendCharToAll(alloc, result, ch) orelse return false;
             i += 1;
         }
     }
@@ -3235,15 +3221,15 @@ fn detectEscapedPrefix(alloc: Allocator, pattern: []const u8) ?[]const u8 {
 /// Check if a string matches the identifier pattern ^[_a-zA-Z][a-zA-Z0-9_-]*$
 /// Very common in JSON Schema (property name patterns).
 fn isIdentifierPattern(pattern: []const u8) bool {
+    // Only match patterns where first char includes _ (matchesIdentifierPattern allows _)
     return std.mem.eql(u8, pattern, "^[_a-zA-Z][a-zA-Z0-9_-]*$") or
-        std.mem.eql(u8, pattern, "^[a-zA-Z_][a-zA-Z0-9_-]*$") or
-        std.mem.eql(u8, pattern, "^[a-zA-Z][a-zA-Z0-9_-]*$");
+        std.mem.eql(u8, pattern, "^[a-zA-Z_][a-zA-Z0-9_-]*$");
 }
 
 fn matchesIdentifierPattern(s: []const u8) bool {
     if (s.len == 0) return false;
-    // First char: [_a-zA-Z]
     const first = s[0];
+    // All 3 patterns allow [a-zA-Z] as first char; only first 2 allow _
     if (!((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_')) return false;
     // Rest: [a-zA-Z0-9_-]*
     for (s[1..]) |ch| {
