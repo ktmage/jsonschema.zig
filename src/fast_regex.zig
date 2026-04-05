@@ -85,8 +85,44 @@ pub const FastRegex = struct {
             } else if (ch == '.') {
                 kind = .dot;
                 i += 1;
-            } else if (ch == '(' or ch == '|') {
-                return null; // alternation/groups not supported
+            } else if (ch == '(') {
+                // Find matching ')' — only support non-alternation groups
+                var depth: usize = 1;
+                var j = i + 1;
+                while (j < inner.len and depth > 0) : (j += 1) {
+                    if (inner[j] == '(') depth += 1
+                    else if (inner[j] == ')') depth -= 1;
+                }
+                if (depth != 0) return null;
+                const group_content = inner[i + 1 .. j - 1];
+                // Check for alternation — not supported
+                for (group_content) |gc| { if (gc == '|') return null; }
+                // Recursively compile group content
+                const sub_regex = FastRegex.compile(
+                    std.fmt.allocPrint(alloc, "^{s}$", .{group_content}) catch return null,
+                    alloc,
+                ) orelse return null;
+                // Add all sub-ops
+                for (sub_regex.ops) |sub_op| ops.append(sub_op) catch return null;
+                i = j; // past ')'
+                // Parse quantifier on the group
+                if (i < inner.len) {
+                    switch (inner[i]) {
+                        '?' => {
+                            // Make all sub-ops optional (min=0)
+                            // Simple case: set first op min=0 (only works for single-op groups)
+                            if (sub_regex.ops.len > 0) {
+                                const last_idx = ops.items.len - sub_regex.ops.len;
+                                for (ops.items[last_idx..]) |*sop| sop.min = 0;
+                            }
+                            i += 1;
+                        },
+                        else => {},
+                    }
+                }
+                continue; // skip the kind/quantifier parsing below
+            } else if (ch == '|') {
+                return null; // alternation not supported
             } else if (ch == ')') {
                 return null;
             } else {
