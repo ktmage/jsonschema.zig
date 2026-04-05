@@ -2619,8 +2619,6 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
 
     // Only merge if we have properties and no incompatible validators
     if (properties_data == null or has_incompatible) return;
-    // Need properties with > 64 entries? Can't use bitmask
-    if (properties_data.?.len > 64) return;
 
     // Build required bitmask: bit i is set if properties[i] is in the required array
     var required_mask: u64 = 0;
