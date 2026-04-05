@@ -260,6 +260,20 @@ pub const GenericValidator = struct {
     keyword_name: []const u8,
 };
 
+/// 128-bit bitmap for fast ASCII character class matching.
+pub const CharBitmap = struct {
+    low: u64,
+    high: u64,
+
+    pub fn contains(self: CharBitmap, ch: u8) bool {
+        if (ch >= 128) return false;
+        if (ch < 64) return (self.low >> @as(u6, @intCast(ch))) & 1 != 0;
+        return (self.high >> @as(u6, @intCast(ch - 64))) & 1 != 0;
+    }
+};
+
+pub const CharClassMode = enum { first_char, all_chars, all_chars_optional };
+
 /// A pre-compiled POSIX regex stored in the arena.
 pub const CompiledRegex = struct {
     regex: c.regex_t,
@@ -268,6 +282,9 @@ pub const CompiledRegex = struct {
     simple_prefix: ?[]const u8 = null,
     /// True if this is a ^[_a-zA-Z][a-zA-Z0-9_-]*$ identifier pattern
     is_identifier: bool = false,
+    /// Fast bitmap-based character class pattern
+    char_class: ?CharBitmap = null,
+    char_class_mode: CharClassMode = .first_char,
 
     /// Check if a string matches this compiled pattern.
     pub fn matches(self: *const CompiledRegex, str: []const u8, allocator: ?std.mem.Allocator) bool {
@@ -277,6 +294,7 @@ pub const CompiledRegex = struct {
         }
         // Fast path: identifier pattern
         if (self.is_identifier) return matchesIdentifierPattern(str);
+        // Fast path: character class bitmap (only for isValidFast, not matches)
         // Regex path: need null-terminated string
         if (!self.valid) return false;
         if (allocator) |alloc| {
@@ -858,6 +876,7 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
                 return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
             }
             if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
+            if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
             // Use stack buffer for null-termination (handles strings up to 511 bytes)
             if (instance_str.len < 512) {
                 var buf: [512]u8 = undefined;
@@ -984,7 +1003,7 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
             };
             // Only handle if all patterns can be matched without allocation
             for (pp_entries) |pp_entry| {
-                if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier) return null;
+                if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and pp_entry.regex.char_class == null) return null;
             }
             const keys = obj.keys();
             const vals = obj.values();
@@ -994,6 +1013,8 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
                         key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix)
                     else if (pp_entry.regex.is_identifier)
                         matchesIdentifierPattern(key)
+                    else if (pp_entry.regex.char_class) |bm|
+                        matchesCharClass(key, bm, pp_entry.regex.char_class_mode)
                     else
                         false;
                     if (matched) {
@@ -2255,11 +2276,83 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     const cr = alloc.create(CompiledRegex) catch return null;
     cr.simple_prefix = detectSimplePrefix(pattern_str);
     cr.is_identifier = isIdentifierPattern(pattern_str);
+    cr.char_class = null;
+    cr.char_class_mode = .first_char;
+    if (cr.simple_prefix == null and !cr.is_identifier) {
+        if (detectCharClass(pattern_str)) |cc| {
+            cr.char_class = cc.bitmap;
+            cr.char_class_mode = cc.mode;
+        }
+    }
     const pattern_z = alloc.dupeZ(u8, pattern_str) catch return null;
     const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
     cr.valid = comp_result == 0;
     regex_list.append(cr) catch {};
     return cr;
+}
+
+/// Match a string against a character class bitmap.
+fn matchesCharClass(s: []const u8, bm: CharBitmap, mode: CharClassMode) bool {
+    switch (mode) {
+        .first_char => {
+            if (s.len == 0) return false;
+            return bm.contains(s[0]);
+        },
+        .all_chars => {
+            if (s.len == 0) return false;
+            for (s) |ch| {
+                if (!bm.contains(ch)) return false;
+            }
+            return true;
+        },
+        .all_chars_optional => {
+            for (s) |ch| {
+                if (!bm.contains(ch)) return false;
+            }
+            return true;
+        },
+    }
+}
+
+/// Parse a character class from a regex pattern like ^[a-z_]+$ and return a bitmap.
+fn detectCharClass(pattern: []const u8) ?struct { bitmap: CharBitmap, mode: CharClassMode } {
+    if (pattern.len < 4 or pattern[0] != '^' or pattern[1] != '[') return null;
+
+    var i: usize = 2;
+    if (i < pattern.len and pattern[i] == '^') return null; // negated class not supported
+    var bitmap = CharBitmap{ .low = 0, .high = 0 };
+
+    while (i < pattern.len and pattern[i] != ']') {
+        const ch = pattern[i];
+        if (ch == '\\') return null; // escaped character
+        if (i + 2 < pattern.len and pattern[i + 1] == '-' and pattern[i + 2] != ']') {
+            const start = ch;
+            const end = pattern[i + 2];
+            if (start > end or start >= 128 or end >= 128) return null;
+            var c_val: u8 = start;
+            while (c_val <= end) : (c_val += 1) {
+                if (c_val < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(c_val))
+                else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(c_val - 64));
+            }
+            i += 3;
+        } else {
+            if (ch >= 128) return null;
+            if (ch < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(ch))
+            else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
+            i += 1;
+        }
+    }
+    if (i >= pattern.len or pattern[i] != ']') return null;
+    i += 1;
+
+    // Determine mode from what follows the char class
+    if (i == pattern.len) return .{ .bitmap = bitmap, .mode = .first_char }; // ^[class]
+    if (i + 1 == pattern.len and pattern[i] == '$') return null; // ^[class]$ - single char, complex
+    if (i + 2 == pattern.len and pattern[i + 1] == '$') {
+        if (pattern[i] == '+') return .{ .bitmap = bitmap, .mode = .all_chars };
+        if (pattern[i] == '*') return .{ .bitmap = bitmap, .mode = .all_chars_optional };
+    }
+    return null;
 }
 
 /// Detect if a regex pattern is a simple "^literal" prefix match.

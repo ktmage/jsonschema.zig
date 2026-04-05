@@ -7,6 +7,14 @@ const compiled_mod = @import("compiled.zig");
 const CompiledSchema = compiled_mod.CompiledSchema;
 const SimpleType = compiled_mod.SimpleType;
 
+/// Create a minimal single-error ValidationResult for bool_only mode.
+/// The caller just checks isValid(), so we only need errors.len > 0.
+fn makeSingleBoolError(allocator: Allocator) jsonschema.ValidationResult {
+    const errors = allocator.alloc(ValidationError, 1) catch return .{ .errors = &.{}, .allocator = allocator };
+    errors[0] = .{ .instance_path = "", .schema_path = "", .keyword = "", .message = "" };
+    return .{ .errors = errors, .allocator = allocator };
+}
+
 /// Fast inline type check without going through the full validator dispatch.
 pub fn matchesSimpleType(instance: std.json.Value, simple_type: SimpleType) bool {
     return switch (simple_type) {
@@ -113,6 +121,32 @@ pub const Context = struct {
                                     return .{ .errors = errs, .allocator = self.allocator };
                                 }
                             }
+                            // Bool-only fast path: skip error collection entirely
+                            if (self.bool_only) {
+                                var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                                const child = Context{
+                                    .allocator = self.allocator,
+                                    .root_schema = self.root_schema,
+                                    .schema = sub_schema,
+                                    .instance = instance,
+                                    .instance_path = "",
+                                    .schema_path = "",
+                                    .errors = &errors,
+                                    .registry = self.registry,
+                                    .base_uri = self.base_uri,
+                                    .ref_base_uri = self.base_uri,
+                                    .dynamic_scope = self.dynamic_scope,
+                                    .compiled = self.compiled,
+                                    .compiled_node = node,
+                                    .bool_only = true,
+                                };
+                                validateAll(child);
+                                if (errors.items.len > 0) {
+                                    // Return a single dummy error to signal failure
+                                    return makeSingleBoolError(self.allocator);
+                                }
+                                return .{ .errors = &.{}, .allocator = self.allocator };
+                            }
                             // Non-simple, non-URI: use compiled dispatch
                             var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
                             const child = Context{
@@ -142,6 +176,23 @@ pub const Context = struct {
                         // needs_uri_resolution with $id — may need slow path
                     } else if (self.registry == null) {
                         // No registry: use compiled direct path even without node
+                        if (self.bool_only) {
+                            var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
+                            const child = Context{
+                                .allocator = self.allocator,
+                                .root_schema = self.root_schema,
+                                .schema = sub_schema,
+                                .instance = instance,
+                                .instance_path = "",
+                                .schema_path = "",
+                                .errors = &errors,
+                                .compiled = self.compiled,
+                                .bool_only = true,
+                            };
+                            validateAll(child);
+                            if (errors.items.len > 0) return makeSingleBoolError(self.allocator);
+                            return .{ .errors = &.{}, .allocator = self.allocator };
+                        }
                         var errors = std.ArrayList(jsonschema.ValidationError).init(self.allocator);
                         const child = Context{
                             .allocator = self.allocator,
@@ -438,6 +489,50 @@ pub fn validateAll(ctx: Context) void {
         const node = ctx.compiled_node orelse compiled.getNode(ctx.schema);
         if (node) |n| {
             if (n.ref_overrides) {
+                // Try direct ref_local dispatch for compiled refs
+                // Only when no registry — registry presence means $id scopes
+                // may affect nested $ref resolution.
+                if (n.validators.len == 1 and ctx.registry == null) {
+                    switch (n.validators[0]) {
+                        .ref_local => |ls| {
+                            const rnode_opt = ls.node orelse compiled.getNode(ls.value);
+                            if (rnode_opt) |rnode| {
+                                const can_skip = !rnode.needs_uri_resolution and !rnode.has_id;
+                                if (can_skip) {
+                                    if (rnode.always_valid) return;
+                                    if (rnode.isValidFast(ctx.instance, compiled)) |result| {
+                                        if (result) return;
+                                        if (ctx.bool_only) {
+                                            ctx.addError("$ref", "");
+                                            return;
+                                        }
+                                    }
+                                    if (ctx.bool_only) {
+                                        if (!ctx.isSubschemaValid(ls.value, ctx.instance)) {
+                                            ctx.addError("$ref", "");
+                                        }
+                                        return;
+                                    }
+                                    // Full error path
+                                    const result = ctx.validateSubschema(ls.value, ctx.instance, ctx.instance_path, ctx.schema_path);
+                                    defer result.deinit();
+                                    if (!result.isValid()) {
+                                        for (result.errors) |err| {
+                                            ctx.errors.append(.{
+                                                .instance_path = ctx.allocator.dupe(u8, err.instance_path) catch return,
+                                                .schema_path = ctx.allocator.dupe(u8, err.schema_path) catch return,
+                                                .keyword = err.keyword,
+                                                .message = ctx.allocator.dupe(u8, err.message) catch return,
+                                            }) catch return;
+                                        }
+                                    }
+                                    return;
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
                 @import("keywords/ref.zig").validate(ctx);
                 return;
             }
@@ -993,8 +1088,20 @@ pub fn validateAll(ctx: Context) void {
                                 if (rnode.always_valid) continue;
                                 if (rnode.isValidFast(ctx.instance, compiled)) |result| {
                                     if (result) continue;
+                                    // isValidFast returned false
+                                    if (ctx.bool_only) {
+                                        ctx.addError("$ref", "");
+                                        continue;
+                                    }
                                 }
-                                // Can't fully inline — call validateAll directly on target
+                                // Bool-only: use isSubschemaValid
+                                if (ctx.bool_only) {
+                                    if (!ctx.isSubschemaValid(ls.value, ctx.instance)) {
+                                        ctx.addError("$ref", "");
+                                    }
+                                    continue;
+                                }
+                                // Full path with error collection
                                 const result = ctx.validateSubschema(ls.value, ctx.instance, ctx.instance_path, ctx.schema_path);
                                 defer result.deinit();
                                 if (!result.isValid()) {

@@ -14,8 +14,6 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    const schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "$ref");
-
     // In Draft 7, $ref ignores sibling keywords including $id.
     // So we resolve $ref against the *parent* base_uri, not one modified by a sibling $id.
     const effective_base = ctx.ref_base_uri;
@@ -29,6 +27,15 @@ pub fn validate(ctx: Context) void {
             return;
         };
 
+        // Bool-only fast path: skip path construction and error copying
+        if (ctx.bool_only) {
+            if (!ctx.isSubschemaValid(final_resolved, ctx.instance)) {
+                ctx.addError("$ref", "referenced schema validation failed");
+            }
+            return;
+        }
+
+        const schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "$ref");
         const result = ctx.validateSubschema(final_resolved, ctx.instance, ctx.instance_path, schema_path);
         defer result.deinit();
 
@@ -44,6 +51,9 @@ pub fn validate(ctx: Context) void {
         }
         return;
     }
+
+    // Slow path: construct schema_path for error reporting
+    const schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "$ref");
 
     // Try registry-based resolution with root tracking
     if (ctx.registry) |reg| {
