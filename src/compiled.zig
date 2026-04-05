@@ -550,6 +550,10 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
                 .string => |str| str,
                 else => return true,
             };
+            // Fast path: if byte count < limit, codepoints < limit (codepoints <= bytes)
+            if (s.len < limit) return false;
+            // If minLength is 1, byte length >= 1 is sufficient
+            if (limit <= 1) return true;
             const len = std.unicode.utf8CountCodepoints(s) catch return true;
             return len >= limit;
         },
@@ -558,6 +562,8 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
                 .string => |str| str,
                 else => return true,
             };
+            // Fast path: if byte count fits in limit, codepoint count also fits (bytes >= codepoints)
+            if (s.len <= limit) return true;
             const len = std.unicode.utf8CountCodepoints(s) catch return true;
             return len <= limit;
         },
