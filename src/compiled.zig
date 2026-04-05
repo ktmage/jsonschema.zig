@@ -1461,7 +1461,7 @@ fn compileKeywords(
             // For large string-only enums, use hashset for O(1) lookup
             const use_hashset = blk: {
                 const arr = switch (kv) { .array => |a| a, else => break :blk false };
-                if (arr.items.len < 8) break :blk false;
+                if (arr.items.len < 4) break :blk false;
                 for (arr.items) |item| {
                     if (item != .string) break :blk false;
                 }

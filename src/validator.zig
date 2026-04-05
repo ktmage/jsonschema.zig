@@ -917,9 +917,7 @@ pub fn validateAll(ctx: Context) void {
                                             need_slow = true;
                                             break;
                                         }
-                                        const can_skip_of = !enode.needs_uri_resolution or
-                                            (!enode.has_id and ctx.registry == null);
-                                        if (can_skip_of) {
+                                        if (!enode.has_id or ctx.registry == null) {
                                             if (enode.isValidFast(val, compiled)) |result| {
                                                 if (result) continue;
                                             }
