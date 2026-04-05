@@ -1431,11 +1431,25 @@ fn compileNode(
 
             // 5. Fill in placeholder with actual data.
             const final_validators = validators.toOwnedSlice() catch &.{};
+            // Propagate simple_type through ref_overrides → ref_local chains
+            var effective_simple_type = detectSimpleType(obj);
+            var effective_always_valid = !ref_overrides and (final_validators.len == 0 or isAlwaysValid(final_validators));
+            if (ref_overrides and final_validators.len == 1) {
+                switch (final_validators[0]) {
+                    .ref_local => |ls| {
+                        if (ls.node) |target| {
+                            if (target.simple_type != .none) effective_simple_type = target.simple_type;
+                            if (target.always_valid) effective_always_valid = true;
+                        }
+                    },
+                    else => {},
+                }
+            }
             node.* = .{
                 .validators = final_validators,
                 .ref_overrides = ref_overrides,
-                .simple_type = detectSimpleType(obj),
-                .always_valid = !ref_overrides and (final_validators.len == 0 or isAlwaysValid(final_validators)),
+                .simple_type = effective_simple_type,
+                .always_valid = effective_always_valid,
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
                 .has_id = obj.get("$id") != null,
                 .has_unevaluated_properties = obj.get("unevaluatedProperties") != null,
