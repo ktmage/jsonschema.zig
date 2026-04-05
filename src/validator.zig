@@ -1033,7 +1033,47 @@ pub fn validateAll(ctx: Context) void {
                             }
                         }
                         // Slow path: use keys/values iteration for error reporting
-                        {
+                        if (ctx.bool_only) {
+                            // Bool-only: skip error path construction
+                            const keys = inst_obj.keys();
+                            const vals = inst_obj.values();
+                            for (keys, vals) |key, val| {
+                                if (ctx.errors.items.len > 0) return;
+                                for (of.properties) |entry| {
+                                    if (std.mem.eql(u8, key, entry.name)) {
+                                        if (!ctx.isSubschemaValidWithNode(entry.schema.value, val, entry.schema.node)) {
+                                            ctx.addError("properties", "");
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            // Required
+                            if (ctx.errors.items.len == 0) {
+                                for (of.properties, 0..) |entry, pi| {
+                                    if (pi >= 64) break;
+                                    if (of.required_mask & (@as(u64, 1) << @as(u6, @intCast(pi))) != 0) {
+                                        if (inst_obj.get(entry.name) == null) {
+                                            ctx.addError("required", "");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            // Additional
+                            if (ctx.errors.items.len == 0 and of.additional_false) {
+                                for (inst_obj.keys()) |key| {
+                                    var found = false;
+                                    for (of.properties) |entry| {
+                                        if (std.mem.eql(u8, key, entry.name)) { found = true; break; }
+                                    }
+                                    if (!found) {
+                                        ctx.addError("additionalProperties", "");
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
                             const keys = inst_obj.keys();
                             const vals = inst_obj.values();
                             for (keys, vals) |key, val| {
