@@ -972,11 +972,13 @@ fn isValid_any_of_compiled(data: *allowzero const anyopaque, instance: std.json.
         if (c0 and !c1) return validateLinkedSchema(w.items[0], instance, compiled);
         if (c1 and !c0) return validateLinkedSchema(w.items[1], instance, compiled);
         if (!c0 and !c1) return false;
-        // Both compatible — check first, if passes return true immediately
-        if (validateLinkedSchema(w.items[0], instance, compiled)) |r0| {
-            if (r0) return true;
-        }
-        return validateLinkedSchema(w.items[1], instance, compiled);
+        // Both compatible — check both, track nulls
+        const r0 = validateLinkedSchema(w.items[0], instance, compiled);
+        const r1 = validateLinkedSchema(w.items[1], instance, compiled);
+        if (r0 != null and r0.?) return true;
+        if (r1 != null and r1.?) return true;
+        if (r0 == null or r1 == null) return null;
+        return false;
     }
     var any_null = false;
     for (w.items) |s| {
@@ -1219,7 +1221,6 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
         .string => |s| s,
         else => return true,
     };
-    if (!cr.valid) return true;
     if (cr.simple_prefix) |prefix| {
         return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
     }
@@ -1248,6 +1249,7 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
     }
     if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
     if (cr.fast) |*fast| return fast.matches(instance_str);
+    if (!cr.valid) return null; // regex compile failed, can't validate in fast path
     if (instance_str.len < 512) {
         var buf: [512]u8 = undefined;
         @memcpy(buf[0..instance_str.len], instance_str);
