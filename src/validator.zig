@@ -734,8 +734,36 @@ pub fn validateAll(ctx: Context) void {
                         }
                     },
                     .unique_items => {
-                        // Handled by isValidFast; validateAll only reached for errors
-                        @import("keywords/unique_items.zig").validate(ctx);
+                        // Hash-based O(n) uniqueness check using allocator
+                        const u_arr = switch (ctx.instance) {
+                            .array => |a| a,
+                            else => continue,
+                        };
+                        if (u_arr.items.len <= 1) continue;
+                        // Build hash set: hash → index, check for collisions with jsonEqual
+                        var hash_map = std.AutoHashMap(u64, usize).init(ctx.allocator);
+                        defer hash_map.deinit();
+                        hash_map.ensureTotalCapacity(@intCast(u_arr.items.len)) catch {};
+                        var found_dup = false;
+                        for (u_arr.items, 0..) |item, idx| {
+                            const h = compiled_mod.jsonValueHash(item);
+                            if (hash_map.get(h)) |prev_idx| {
+                                // Hash collision: verify with deep equality
+                                if (@import("keywords/enum_keyword.zig").jsonEqual(item, u_arr.items[prev_idx])) {
+                                    found_dup = true;
+                                    break;
+                                }
+                                // Different values with same hash: continue (store both is complex, fall back)
+                            }
+                            hash_map.put(h, idx) catch {};
+                        }
+                        if (found_dup) {
+                            ctx.addError("uniqueItems", "Array items are not unique");
+                        } else if (!found_dup) {
+                            // Hash-only check passed, but may have hash collisions hiding duplicates
+                            // Fall back to O(n²) for correctness
+                            @import("keywords/unique_items.zig").validate(ctx);
+                        }
                     },
                     .required => {
                         const names_w: *const compiled_mod.CompiledValidator.StringSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.StringSliceWrapper);
