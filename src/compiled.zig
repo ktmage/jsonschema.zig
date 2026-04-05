@@ -625,6 +625,29 @@ pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled
                 .object => |o| o,
                 else => return true,
             };
+            // Optimization: if instance has fewer properties than schema,
+            // iterate instance and linear-scan schema (avoids N hashmap lookups)
+            if (inst_obj.count() < entries.len and entries.len > 4) {
+                const keys = inst_obj.keys();
+                const vals = inst_obj.values();
+                for (keys, vals) |key, val| {
+                    for (entries) |entry| {
+                        if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
+                            if (entry.schema.node) |n| {
+                                if (n.always_valid) break;
+                                if (n.simple_type != .none) {
+                                    if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
+                                    break;
+                                }
+                            }
+                            const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                            if (!result) return false;
+                            break;
+                        }
+                    }
+                }
+                return true;
+            }
             for (entries) |entry| {
                 const inst_val = inst_obj.get(entry.name) orelse continue;
                 const result = validateLinkedSchema(entry.schema, inst_val, compiled) orelse return null;
