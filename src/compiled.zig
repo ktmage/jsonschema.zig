@@ -890,6 +890,19 @@ fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.
 fn isValid_any_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
     const w: *const CompiledValidator.LinkedSchemaSliceWrapper = @ptrCast(@alignCast(data));
     const inst_mask = typeMaskForValue(instance);
+    // Fast path for 2-branch anyOf (very common: type vs expressionSyntax)
+    if (w.items.len == 2) {
+        const c0 = w.items[0].type_mask & inst_mask != 0;
+        const c1 = w.items[1].type_mask & inst_mask != 0;
+        if (c0 and !c1) return validateLinkedSchema(w.items[0], instance, compiled);
+        if (c1 and !c0) return validateLinkedSchema(w.items[1], instance, compiled);
+        if (!c0 and !c1) return false;
+        // Both compatible — check first, if passes return true immediately
+        if (validateLinkedSchema(w.items[0], instance, compiled)) |r0| {
+            if (r0) return true;
+        }
+        return validateLinkedSchema(w.items[1], instance, compiled);
+    }
     var any_null = false;
     for (w.items) |s| {
         if (s.type_mask & inst_mask == 0) continue;
