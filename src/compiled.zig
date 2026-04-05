@@ -739,8 +739,32 @@ fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value,
             return true;
         }
     }
-    // Optimized: only compare items of the same JSON type
-    // (different types can never be equal in JSON)
+    // Bloom filter: 4 hash functions × 512 bits = very low false positive rate
+    // For 80 items: P(fp) ≈ (1 - e^(-4*80/512))^4 ≈ 0.02
+    {
+        var bloom: [8]u64 = [_]u64{0} ** 8; // 512 bits
+        var maybe_dup = false;
+        for (arr) |item| {
+            const h = jsonValueHash(item);
+            const b0 = @as(u6, @intCast(h & 63));
+            const b1 = @as(u6, @intCast((h >> 8) & 63));
+            const b2 = @as(u6, @intCast((h >> 16) & 63));
+            const b3 = @as(u6, @intCast((h >> 24) & 63));
+            const w0 = h & 7; const w1 = (h >> 8) & 7; const w2 = (h >> 16) & 7; const w3 = (h >> 24) & 7;
+            if ((bloom[w0] >> b0) & 1 != 0 and (bloom[w1] >> b1) & 1 != 0 and
+                (bloom[w2] >> b2) & 1 != 0 and (bloom[w3] >> b3) & 1 != 0) {
+                maybe_dup = true;
+                break;
+            }
+            bloom[w0] |= @as(u64, 1) << b0;
+            bloom[w1] |= @as(u64, 1) << b1;
+            bloom[w2] |= @as(u64, 1) << b2;
+            bloom[w3] |= @as(u64, 1) << b3;
+        }
+        if (!maybe_dup) return true;
+    }
+
+    // Collision detected: fall back to O(n²) but only compare same-type items
     for (0..arr.len - 1) |i| {
         const tag_i = @intFromEnum(std.meta.activeTag(arr[i]));
         for (i + 1..arr.len) |j| {
@@ -749,6 +773,35 @@ fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value,
         }
     }
     return true;
+}
+
+/// Simple hash function for JSON values (for uniqueItems dedup).
+fn jsonValueHash(val: std.json.Value) u64 {
+    return switch (val) {
+        .null => 0x1234567890abcdef,
+        .bool => |b| if (b) @as(u64, 1) else @as(u64, 0),
+        .integer => |n| @bitCast(@as(i64, n)),
+        .float => |f| @bitCast(f),
+        .string => |s| blk: {
+            var h: u64 = 0xcbf29ce484222325;
+            for (s) |ch| h = (h ^ ch) *% 0x100000001b3;
+            break :blk h;
+        },
+        .array => |a| blk: {
+            var h: u64 = 0xa5a5a5a5 +% @as(u64, a.items.len);
+            for (a.items) |item| h = h *% 31 +% jsonValueHash(item);
+            break :blk h;
+        },
+        .object => |o| blk: {
+            var h: u64 = 0x5a5a5a5a +% @as(u64, o.count());
+            for (o.keys()) |k| {
+                for (k) |ch| h = (h ^ ch) *% 0x100000001b3;
+            }
+            for (o.values()) |v| h = h *% 31 +% jsonValueHash(v);
+            break :blk h;
+        },
+        .number_string => 0,
+    };
 }
 
 fn isValid_required(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
