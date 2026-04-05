@@ -1650,6 +1650,46 @@ fn compileKeywords(
             .keyword_value = kv,
             .keyword_name = "dependencies",
         } }) catch {};
+        // Also compile array-form dependencies as dependent_required_compiled
+        // and schema-form as dependent_schemas_compiled
+        if (kv == .object) {
+            var dr_entries = std.ArrayList(DependentRequiredEntry).init(alloc);
+            var ds_entries = std.ArrayList(DependentSchemaEntry).init(alloc);
+            var deps_it = kv.object.iterator();
+            while (deps_it.next()) |dep_entry| {
+                switch (dep_entry.value_ptr.*) {
+                    .array => |arr| {
+                        var req_names = std.ArrayList([]const u8).init(alloc);
+                        for (arr.items) |item| {
+                            if (item == .string) req_names.append(item.string) catch {};
+                        }
+                        if (req_names.items.len > 0) {
+                            dr_entries.append(.{
+                                .trigger = dep_entry.key_ptr.*,
+                                .required = req_names.toOwnedSlice() catch &.{},
+                            }) catch {};
+                        }
+                    },
+                    .object, .bool => {
+                        ds_entries.append(.{
+                            .trigger = dep_entry.key_ptr.*,
+                            .schema = linkSchema(node_map, dep_entry.value_ptr.*),
+                        }) catch {};
+                    },
+                    else => {},
+                }
+            }
+            // Remove the generic and replace with compiled variants
+            if (dr_entries.items.len > 0 or ds_entries.items.len > 0) {
+                _ = validators.pop(); // remove the generic we just added
+                if (dr_entries.items.len > 0) {
+                    validators.append(.{ .dependent_required_compiled = dr_entries.toOwnedSlice() catch &.{} }) catch {};
+                }
+                if (ds_entries.items.len > 0) {
+                    validators.append(.{ .dependent_schemas_compiled = ds_entries.toOwnedSlice() catch &.{} }) catch {};
+                }
+            }
+        }
     }
     if (obj.get("dependentRequired")) |kv| {
         if (!validation_vocab_disabled) {
