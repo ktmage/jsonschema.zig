@@ -55,18 +55,30 @@ pub fn isValidCompiled(
         else => return true,
     }
 
-    // Try isValidFast first (zero-allocation)
-    if (compiled.getNode(schema)) |node| {
-        if (node.always_valid) return true;
-        const can_skip = !node.needs_uri_resolution or !node.has_id;
-        if (can_skip) {
-            if (node.isValidFast(instance, compiled)) |result| return result;
+    const node = compiled.getNode(schema);
+    if (node) |n| {
+        if (n.always_valid) return true;
+        if (!n.has_id) {
+            if (n.isValidFast(instance, compiled)) |result| return result;
         }
     }
 
-    // Fallback: full validation
-    const result = validateCompiled(allocator, compiled, instance);
-    return result.isValid();
+    // Fallback: lightweight bool_only validateAll (no ValidationResult overhead)
+    var errors = std.ArrayList(ValidationError).init(allocator);
+    const ctx = Validator.Context{
+        .allocator = allocator,
+        .root_schema = schema,
+        .schema = schema,
+        .instance = instance,
+        .instance_path = "",
+        .schema_path = "",
+        .errors = &errors,
+        .compiled = compiled,
+        .compiled_node = node,
+        .bool_only = true,
+    };
+    Validator.validateAll(ctx);
+    return errors.items.len == 0;
 }
 
 /// Validate an instance against a pre-compiled schema.
