@@ -30,7 +30,7 @@ pub fn validate(ctx: Context) void {
 
     if (has_min_contains or has_max_contains) {
         // When minContains or maxContains are present, they control the validation
-        const min_contains = getIntFromValue(schema_obj.get("minContains")) orelse if (has_min_contains) return else @as(usize, 1);
+        const min_contains = getIntFromValue(schema_obj.get("minContains")) orelse @as(usize, 1);
         const max_contains = getIntFromValue(schema_obj.get("maxContains"));
 
         if (match_count < min_contains) {
