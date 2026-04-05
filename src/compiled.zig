@@ -1070,7 +1070,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
     if (node.simple_type != .none) return true;
     for (node.validators) |v| {
         switch (v) {
-            .generic, .pattern, .pattern_properties_compiled => return false,
+            .generic, .pattern_properties_compiled => return false,
             else => {},
         }
     }
