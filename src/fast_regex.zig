@@ -156,7 +156,7 @@ pub const FastRegex = struct {
                 if (pos > greedy_start and oi + 1 < ops.len and stack_len < 64) {
                     stack[stack_len] = .{
                         .op_idx = @intCast(oi),
-                        .pos = @intCast(pos - 1), // try one less
+                        .pos = @intCast(pos - 1),
                         .greedy_start = @intCast(greedy_start),
                     };
                     stack_len += 1;
