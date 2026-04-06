@@ -376,12 +376,20 @@ pub const Context = struct {
             return;
         }
         const schema_p = JsonPointer.appendProperty(self.allocator, self.schema_path, keyword);
+        const ip = self.allocator.dupe(u8, self.instance_path) catch return;
+        const msg = self.allocator.dupe(u8, message) catch {
+            self.allocator.free(ip);
+            return;
+        };
         self.errors.append(.{
-            .instance_path = self.allocator.dupe(u8, self.instance_path) catch return,
+            .instance_path = ip,
             .schema_path = schema_p,
             .keyword = keyword,
-            .message = self.allocator.dupe(u8, message) catch return,
-        }) catch return;
+            .message = msg,
+        }) catch {
+            self.allocator.free(msg);
+            self.allocator.free(ip);
+        };
     }
 };
 
