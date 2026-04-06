@@ -81,6 +81,32 @@ pub const CompiledSchema = struct {
         // into sub-schemas, so child nodes are available for pre-linking.
         compileNode(alloc, schema, schema, &node_map, is_2020, validation_vocab_disabled, &regex_list);
 
+        // Also compile all external schemas from the registry so that $ref
+        // resolution can use the fast path instead of falling back to slow path.
+        if (registry) |reg| {
+            var reg_it = reg.schemas.iterator();
+            while (reg_it.next()) |entry| {
+                const ext_schema = entry.value_ptr.*;
+                switch (ext_schema) {
+                    .object => |o| {
+                        const key = @intFromPtr(o.keys().ptr);
+                        if (node_map.get(key) == null) {
+                            compileNode(alloc, ext_schema, ext_schema, &node_map, is_2020, validation_vocab_disabled, &regex_list);
+                        }
+                    },
+                    else => {},
+                }
+            }
+            // Re-link all nodes now that external schemas are in node_map
+            var node_it = node_map.iterator();
+            while (node_it.next()) |entry| {
+                const node = entry.value_ptr.*;
+                for (node.validators) |*v| {
+                    relinkValidator(v, &node_map);
+                }
+            }
+        }
+
         // Post-process: selectively disable needs_uri_resolution for nodes
         // whose $ref targets are fully inlinable by isValidFast.
         optimizeRefResolution(schema, &node_map);
@@ -1716,6 +1742,78 @@ fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) Li
         }
     }
     return .{ .node = node, .value = value, .type_mask = mask };
+}
+
+/// Re-resolve a LinkedSchema's node pointer after external schemas have been added to node_map.
+fn relinkLinkedSchema(ls: *LinkedSchema, node_map: *const CompiledSchema.NodeMap) void {
+    if (ls.node != null) return; // already linked
+    switch (ls.value) {
+        .object => |o| {
+            ls.node = node_map.get(@intFromPtr(o.keys().ptr));
+        },
+        else => {},
+    }
+}
+
+/// Re-link all LinkedSchema fields within a validator after external schemas are compiled.
+fn relinkValidator(v: *const CompiledValidator, node_map: *const CompiledSchema.NodeMap) void {
+    switch (v.tag) {
+        .properties_compiled => {
+            const w: *const CompiledValidator.PropertyEntrySliceWrapper = v.getData(*const CompiledValidator.PropertyEntrySliceWrapper);
+            for (@constCast(w.items)) |*entry| relinkLinkedSchema(&entry.schema, node_map);
+        },
+        .all_of_compiled, .any_of_compiled, .prefix_items_compiled => {
+            const w: *const CompiledValidator.LinkedSchemaSliceWrapper = v.getData(*const CompiledValidator.LinkedSchemaSliceWrapper);
+            for (@constCast(w.items)) |*ls| relinkLinkedSchema(ls, node_map);
+        },
+        .one_of_compiled => {
+            const oo: *OneOfCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            for (@constCast(oo.schemas)) |*ls| relinkLinkedSchema(ls, node_map);
+        },
+        .items_compiled => {
+            const ic: *ItemsCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            relinkLinkedSchema(&ic.schema, node_map);
+        },
+        .not_compiled => {
+            const ls: *LinkedSchema = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            relinkLinkedSchema(ls, node_map);
+        },
+        .ref_local => {
+            const ls: *LinkedSchema = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            relinkLinkedSchema(ls, node_map);
+        },
+        .if_then_else_compiled => {
+            const ite: *IfThenElseCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            relinkLinkedSchema(&ite.if_schema, node_map);
+            if (ite.then_schema) |*ts| relinkLinkedSchema(ts, node_map);
+            if (ite.else_schema) |*es| relinkLinkedSchema(es, node_map);
+        },
+        .contains_compiled => {
+            const cc: *ContainsCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            relinkLinkedSchema(&cc.schema, node_map);
+        },
+        .dependent_schemas_compiled => {
+            const w: *const CompiledValidator.DependentSchemaSliceWrapper = v.getData(*const CompiledValidator.DependentSchemaSliceWrapper);
+            for (@constCast(w.items)) |*dep| relinkLinkedSchema(&dep.schema, node_map);
+        },
+        .property_names_compiled => {
+            const ls: *LinkedSchema = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            relinkLinkedSchema(ls, node_map);
+        },
+        .pattern_properties_compiled => {
+            const w: *const CompiledValidator.PatternPropertySliceWrapper = v.getData(*const CompiledValidator.PatternPropertySliceWrapper);
+            for (@constCast(w.items)) |*entry| relinkLinkedSchema(&entry.schema, node_map);
+        },
+        .additional_properties_schema => {
+            const aps: *AdditionalPropsSchemaCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            relinkLinkedSchema(&aps.schema, node_map);
+        },
+        .object_fast => {
+            const of: *ObjectFastCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
+            for (@constCast(of.properties)) |*entry| relinkLinkedSchema(&entry.schema, node_map);
+        },
+        else => {},
+    }
 }
 
 fn linkSchemaArray(alloc: Allocator, node_map: *const CompiledSchema.NodeMap, items: []const std.json.Value) []const LinkedSchema {
