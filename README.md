@@ -1,5 +1,7 @@
 # jsonschema.zig
 
+[![CI](https://github.com/ktmage/jsonschema.zig/actions/workflows/ci.yml/badge.svg)](https://github.com/ktmage/jsonschema.zig/actions/workflows/ci.yml)
+
 > [!WARNING]
 > This entire project — code, tests, optimizations, benchmarks, and this README — was autonomously written by [Claude Code](https://claude.ai/claude-code). No human reviewed the benchmark methodology or verified these numbers are fair. The AI may have unknowingly introduced shortcuts that inflate performance, or configured benchmarks in ways that favor this implementation. We found and fixed 17 correctness bugs during audits, but more may exist. **Treat these benchmarks as rough, unverified estimates — not rigorous measurements.** If you find anything wrong, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — it will be fixed immediately.
 
@@ -45,7 +47,7 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 </details>
 
 - **Full specification coverage**: Draft 7 (920/920 tests) and Draft 2020-12 (1142/1142 tests) with 100% pass rate against the official [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
-- **Zero dependencies**: Pure Zig, only `std` — no C libraries, no allocator hacks
+- **Minimal dependencies**: Pure Zig with `std` only — links libc for POSIX regex fallback (used for patterns the built-in FastRegex engine doesn't cover)
 - **Compiled schema mode**: Pre-compile schemas once, validate many times with pre-linked sub-schema dispatch and zero-allocation fast paths
 - **Detailed error reporting**: JSON Pointer paths to both the failing instance location and the schema keyword that rejected it
 
@@ -188,6 +190,20 @@ zig build test     # Run the full test suite (auto-fetches JSON Schema Test Suit
 ```
 
 **Requirements**: Zig 0.14.0+
+
+## Versioning
+
+This project follows [Semantic Versioning](https://semver.org/):
+
+- **Major** (1.0.0 → 2.0.0): Breaking API changes
+- **Minor** (0.1.0 → 0.2.0): New features, backward compatible
+- **Patch** (0.1.0 → 0.1.1): Bug fixes only
+
+The library is currently pre-1.0. The public API (`validate`, `validateCompiled`, `isValidCompiled`, `CompiledSchema`, `SchemaRegistry`, `ValidationResult`) may change between minor versions. A 1.0.0 release will signal API stability.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR guidelines.
 
 ## License
 

@@ -614,8 +614,7 @@ fn isValid_type_multi(data: *allowzero const anyopaque, instance: std.json.Value
         .bool => (mask & 2) != 0,
         .integer => (mask & (4 | 8)) != 0, // matches "integer" or "number"
         .float => |f| if ((mask & 8) != 0) true // "number" accepts all floats
-        else if (has_integer) @floor(f) == f and !std.math.isNan(f) and !std.math.isInf(f)
-        else false,
+        else if (has_integer) @floor(f) == f and !std.math.isNan(f) and !std.math.isInf(f) else false,
         .string => (mask & 16) != 0,
         .array => (mask & 32) != 0,
         .object => (mask & 64) != 0,
@@ -720,7 +719,10 @@ fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value,
     if (arr.len <= 64) {
         var all_strings = true;
         for (arr) |item| {
-            if (item != .string) { all_strings = false; break; }
+            if (item != .string) {
+                all_strings = false;
+                break;
+            }
         }
         if (all_strings) {
             var seen: u64 = 0;
@@ -762,7 +764,8 @@ fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value,
             const w2 = (h2 >> 26) & 63;
             if ((bloom[w0] >> b0) & 1 != 0 and
                 (bloom[w1] >> b1) & 1 != 0 and
-                (bloom[w2] >> b2) & 1 != 0) {
+                (bloom[w2] >> b2) & 1 != 0)
+            {
                 maybe_dup = true;
                 break;
             }
@@ -1081,7 +1084,10 @@ fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Valu
                 if (key.len == entry.name.len and std.mem.eql(u8, key, entry.name)) {
                     if (pi < 64) found_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
                     if (entry.schema.node) |n| {
-                        if (n.always_valid) { matched = true; break; }
+                        if (n.always_valid) {
+                            matched = true;
+                            break;
+                        }
                         if (n.simple_type != .none) {
                             if (!Validator.matchesSimpleType(val, n.simple_type)) return false;
                             matched = true;
@@ -1410,8 +1416,12 @@ fn getNestedSimpleType(node: *const CompiledNode) ?NestedArrayInfo {
                 const ic: *const ItemsCompiled = nv.getData(*const ItemsCompiled);
                 items_node = if (ic.schema.node) |n| n else return null;
             },
-            .object_fast, .required, .properties_compiled, .generic,
-            .pattern_compiled, .pattern_properties_compiled,
+            .object_fast,
+            .required,
+            .properties_compiled,
+            .generic,
+            .pattern_compiled,
+            .pattern_properties_compiled,
             => return null,
             else => {},
         }
@@ -1674,7 +1684,10 @@ fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) Li
                             if (stored_mask & 64 != 0) mask |= 64; // object
                             break;
                         },
-                        .object_fast => { mask = 64; break; },
+                        .object_fast => {
+                            mask = 64;
+                            break;
+                        },
                         else => {},
                     }
                 }
@@ -1729,12 +1742,14 @@ fn compileNode(
             } else {
                 // ref_overrides: only compile $ref as ref_local for direct target access
                 if (obj.get("$ref")) |kv| {
-                    const ref_str = switch (kv) { .string => |s| s, else => null };
+                    const ref_str = switch (kv) {
+                        .string => |s| s,
+                        else => null,
+                    };
                     if (ref_str) |rs| {
                         if (rs.len > 0 and rs[0] == '#') {
                             var resolved: ?std.json.Value = null;
-                            if (rs.len == 1) resolved = root_schema
-                            else if (rs.len >= 2 and rs[1] == '/') resolved = @import("schema_registry.zig").resolvePointer(root_schema, rs[2..]);
+                            if (rs.len == 1) resolved = root_schema else if (rs.len >= 2 and rs[1] == '/') resolved = @import("schema_registry.zig").resolvePointer(root_schema, rs[2..]);
                             if (resolved) |r| {
                                 if (alloc.create(LinkedSchema)) |ls| {
                                     ls.* = linkSchema(node_map, r);
@@ -1891,7 +1906,10 @@ fn compileKeywords(
         if (!validation_vocab_disabled) {
             // For large string-only enums, use hashset for O(1) lookup
             const use_hashset = blk: {
-                const arr = switch (kv) { .array => |a| a, else => break :blk false };
+                const arr = switch (kv) {
+                    .array => |a| a,
+                    else => break :blk false,
+                };
                 if (arr.items.len < 4) break :blk false;
                 for (arr.items) |item| {
                     if (item != .string) break :blk false;
@@ -1906,26 +1924,35 @@ fn compileKeywords(
                     }
                     validators.append(CompiledValidator.initPtr(.enum_string_set, hm, &isValid_enum_string_set)) catch {};
                 } else |_| {
-                    switch (kv) { .array => |a| {
+                    switch (kv) {
+                        .array => |a| {
+                            if (alloc.create(CompiledValidator.SliceWrapper)) |w| {
+                                w.* = .{ .items = a.items };
+                                validators.append(CompiledValidator.initPtr(.enum_check, w, &isValid_enum_check)) catch {};
+                            } else |_| {}
+                        },
+                        else => {},
+                    }
+                }
+            } else {
+                switch (kv) {
+                    .array => |a| {
                         if (alloc.create(CompiledValidator.SliceWrapper)) |w| {
                             w.* = .{ .items = a.items };
                             validators.append(CompiledValidator.initPtr(.enum_check, w, &isValid_enum_check)) catch {};
                         } else |_| {}
-                    }, else => {} }
+                    },
+                    else => {},
                 }
-            } else {
-                switch (kv) { .array => |a| {
-                    if (alloc.create(CompiledValidator.SliceWrapper)) |w| {
-                        w.* = .{ .items = a.items };
-                        validators.append(CompiledValidator.initPtr(.enum_check, w, &isValid_enum_check)) catch {};
-                    } else |_| {}
-                }, else => {} }
             }
         }
     }
     if (obj.get("const")) |kv| {
         if (!validation_vocab_disabled) {
-            if (alloc.create(std.json.Value)) |vp| { vp.* = kv; validators.append(CompiledValidator.initPtr(.const_check, vp, &isValid_const_check)) catch {}; } else |_| {}
+            if (alloc.create(std.json.Value)) |vp| {
+                vp.* = kv;
+                validators.append(CompiledValidator.initPtr(.const_check, vp, &isValid_const_check)) catch {};
+            } else |_| {}
         }
     }
 
@@ -2034,7 +2061,10 @@ fn compileKeywords(
     }
     if (obj.get("additionalItems")) |ai_kv| {
         if (ai_kv == .object) {
-            const tuple_len: usize = if (obj.get("items")) |iv| switch (iv) { .array => |a| a.items.len, else => 0 } else 0;
+            const tuple_len: usize = if (obj.get("items")) |iv| switch (iv) {
+                .array => |a| a.items.len,
+                else => 0,
+            } else 0;
             if (tuple_len > 0) {
                 if (alloc.create(ItemsCompiled)) |ic| {
                     ic.* = .{ .schema = linkSchema(node_map, ai_kv), .prefix_count = tuple_len, .is_additional_items = true };
@@ -2191,7 +2221,10 @@ fn compileKeywords(
         }
     }
     if (obj.get("propertyNames")) |kv| {
-        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(CompiledValidator.initPtr(.property_names_compiled, ls, &isValid_property_names_compiled)) catch {}; } else |_| {}
+        if (alloc.create(LinkedSchema)) |ls| {
+            ls.* = linkSchema(node_map, kv);
+            validators.append(CompiledValidator.initPtr(.property_names_compiled, ls, &isValid_property_names_compiled)) catch {};
+        } else |_| {}
     }
     if (obj.get("dependencies")) |kv| {
         validators.append(makeGeneric(alloc, @import("keywords/dependencies.zig").validate, kv, "dependencies")) catch {};
@@ -2345,7 +2378,10 @@ fn compileKeywords(
         }
     }
     if (obj.get("not")) |kv| {
-        if (alloc.create(LinkedSchema)) |ls| { ls.* = linkSchema(node_map, kv); validators.append(CompiledValidator.initPtr(.not_compiled, ls, &isValid_not_compiled)) catch {}; } else |_| {}
+        if (alloc.create(LinkedSchema)) |ls| {
+            ls.* = linkSchema(node_map, kv);
+            validators.append(CompiledValidator.initPtr(.not_compiled, ls, &isValid_not_compiled)) catch {};
+        } else |_| {}
     }
 
     // Reference
@@ -2381,7 +2417,10 @@ fn compileKeywords(
     }
     if (obj.get("$dynamicRef")) |kv| {
         // Try to resolve $dynamicRef via anchor cache at compile time
-        const ref_str = switch (kv) { .string => |s| s, else => null };
+        const ref_str = switch (kv) {
+            .string => |s| s,
+            else => null,
+        };
         var compiled_as_ref = false;
         if (ref_str) |rs| {
             // Extract fragment: #anchor_name
@@ -2506,10 +2545,19 @@ fn detectRequiredDiscriminator(
     // Each branch must have a unique required field
     var unique_fields: [2]?[]const u8 = .{ null, null };
     for (branches, 0..) |branch, bi| {
-        const obj = switch (branch) { .object => |o| o, else => return null_result };
-        const req = switch (obj.get("required") orelse return null_result) { .array => |a| a.items, else => return null_result };
+        const obj = switch (branch) {
+            .object => |o| o,
+            else => return null_result,
+        };
+        const req = switch (obj.get("required") orelse return null_result) {
+            .array => |a| a.items,
+            else => return null_result,
+        };
         if (req.len != 1) return null_result;
-        unique_fields[bi] = switch (req[0]) { .string => |s| s, else => return null_result };
+        unique_fields[bi] = switch (req[0]) {
+            .string => |s| s,
+            else => return null_result,
+        };
     }
 
     const f0 = unique_fields[0] orelse return null_result;
@@ -2799,7 +2847,10 @@ pub fn convertEcmaToPostfix(alloc: Allocator, pattern: []const u8) ![]const u8 {
     for (0..pattern.len) |i| {
         if (i + 1 < pattern.len and pattern[i] == '\\') {
             switch (pattern[i + 1]) {
-                'd', 'D', 'w', 'W', 's', 'S' => { needs_conversion = true; break; },
+                'd', 'D', 'w', 'W', 's', 'S' => {
+                    needs_conversion = true;
+                    break;
+                },
                 else => {},
             }
         }
@@ -2914,9 +2965,11 @@ fn detectLiteralSet(alloc: Allocator, pattern: []const u8) ?[]const []const u8 {
     var paren_open: ?usize = null;
     var paren_close: ?usize = null;
     for (inner, 0..) |ch, i| {
-        if (ch == '(' and paren_open == null) { paren_open = i; }
-        else if (ch == ')' and paren_open != null and paren_close == null) { paren_close = i; }
-        else if (ch == '(' or ch == ')') return null; // nested/extra parens
+        if (ch == '(' and paren_open == null) {
+            paren_open = i;
+        } else if (ch == ')' and paren_open != null and paren_close == null) {
+            paren_close = i;
+        } else if (ch == '(' or ch == ')') return null; // nested/extra parens
     }
     const po = paren_open orelse return null;
     const pc = paren_close orelse return null;
@@ -2934,8 +2987,18 @@ fn detectLiteralSet(alloc: Allocator, pattern: []const u8) ?[]const []const u8 {
     }
 
     // Verify prefix and suffix are literal (no metacharacters)
-    for (prefix) |ch| { switch (ch) { '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null, else => {} } }
-    for (suffix) |ch| { switch (ch) { '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null, else => {} } }
+    for (prefix) |ch| {
+        switch (ch) {
+            '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null,
+            else => {},
+        }
+    }
+    for (suffix) |ch| {
+        switch (ch) {
+            '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null,
+            else => {},
+        }
+    }
 
     var alternatives = std.ArrayList([]const u8).init(alloc);
 
@@ -3007,14 +3070,12 @@ fn detectCharClass(pattern: []const u8) ?struct { bitmap: CharBitmap, mode: Char
             if (start > end or start >= 128 or end >= 128) return null;
             var c_val: u8 = start;
             while (c_val <= end) : (c_val += 1) {
-                if (c_val < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(c_val))
-                else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(c_val - 64));
+                if (c_val < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(c_val)) else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(c_val - 64));
             }
             i += 3;
         } else {
             if (ch >= 128) return null;
-            if (ch < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(ch))
-            else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
+            if (ch < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
             i += 1;
         }
     }
@@ -3089,8 +3150,7 @@ fn expandInto(alloc: Allocator, result: *std.ArrayList([]const u8), pat: []const
             var depth: usize = 1;
             var j = i + 1;
             while (j < pat.len and depth > 0) : (j += 1) {
-                if (pat[j] == '(') depth += 1
-                else if (pat[j] == ')') depth -= 1;
+                if (pat[j] == '(') depth += 1 else if (pat[j] == ')') depth -= 1;
             }
             if (depth != 0) return false;
             const group = pat[i + 1 .. j - 1];
@@ -3101,9 +3161,7 @@ fn expandInto(alloc: Allocator, result: *std.ArrayList([]const u8), pat: []const
             var alt_start: usize = 0;
             var d: usize = 0;
             for (group, 0..) |gc, gi| {
-                if (gc == '(') d += 1
-                else if (gc == ')') d -= 1
-                else if (gc == '|' and d == 0) {
+                if (gc == '(') d += 1 else if (gc == ')') d -= 1 else if (gc == '|' and d == 0) {
                     alts.append(group[alt_start..gi]) catch return false;
                     alt_start = gi + 1;
                 }
@@ -3386,9 +3444,9 @@ fn recurseIntoSubSchemas(
 ) void {
     // Sub-schema keywords (single schema)
     const single_schema_keywords = [_][]const u8{
-        "additionalProperties", "additionalItems", "contains",
-        "if",                   "then",            "else",
-        "not",                  "items",           "propertyNames",
+        "additionalProperties", "additionalItems",       "contains",
+        "if",                   "then",                  "else",
+        "not",                  "items",                 "propertyNames",
         "unevaluatedItems",     "unevaluatedProperties",
     };
 
@@ -3418,8 +3476,8 @@ fn recurseIntoSubSchemas(
 
     // Sub-schema keywords (object mapping string -> schema)
     const object_schema_keywords = [_][]const u8{
-        "properties",      "patternProperties", "definitions",
-        "$defs",           "dependencies",      "dependentSchemas",
+        "properties",        "patternProperties", "definitions",
+        "$defs",             "dependencies",      "dependentSchemas",
         "dependentRequired",
     };
 
@@ -3479,9 +3537,9 @@ fn detectSimpleType(obj: std.json.ObjectMap) SimpleType {
 
 fn isAnnotationOnly(key: []const u8) bool {
     const annotations = [_][]const u8{
-        "description", "title",    "$comment", "default",
-        "examples",    "format",   "$id",      "$schema",
-        "readOnly",    "writeOnly", "$anchor", "$defs",
+        "description", "title",      "$comment", "default",
+        "examples",    "format",     "$id",      "$schema",
+        "readOnly",    "writeOnly",  "$anchor",  "$defs",
         "definitions", "deprecated",
     };
     for (annotations) |a| {

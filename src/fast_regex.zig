@@ -108,15 +108,16 @@ pub const FastRegex = struct {
                 var depth: usize = 1;
                 var j = i + 1;
                 while (j < inner.len and depth > 0) : (j += 1) {
-                    if (inner[j] == '(') depth += 1
-                    else if (inner[j] == ')') depth -= 1;
+                    if (inner[j] == '(') depth += 1 else if (inner[j] == ')') depth -= 1;
                 }
                 if (depth != 0) return null;
                 // Skip ?: prefix for non-capturing groups
                 const content_start = if (is_non_capturing) i + 3 else i + 1;
                 const group_content = inner[content_start .. j - 1];
                 // Check for alternation — not supported
-                for (group_content) |gc| { if (gc == '|') return null; }
+                for (group_content) |gc| {
+                    if (gc == '|') return null;
+                }
                 // Recursively compile group content
                 const sub_regex = FastRegex.compile(
                     std.fmt.allocPrint(alloc, "^{s}$", .{group_content}) catch return null,
@@ -148,9 +149,21 @@ pub const FastRegex = struct {
             var max: u16 = 1;
             if (i < inner.len) {
                 switch (inner[i]) {
-                    '*' => { min = 0; max = 0; i += 1; },
-                    '+' => { min = 1; max = 0; i += 1; },
-                    '?' => { min = 0; max = 1; i += 1; },
+                    '*' => {
+                        min = 0;
+                        max = 0;
+                        i += 1;
+                    },
+                    '+' => {
+                        min = 1;
+                        max = 0;
+                        i += 1;
+                    },
+                    '?' => {
+                        min = 0;
+                        max = 1;
+                        i += 1;
+                    },
                     '{' => {
                         const q = parseQuantifier(inner, &i) orelse return null;
                         min = q.min;
@@ -165,8 +178,7 @@ pub const FastRegex = struct {
             var op_high: u64 = 0;
             switch (kind) {
                 .literal => |lit| {
-                    if (lit < 64) op_low = @as(u64, 1) << @as(u6, @intCast(lit))
-                    else if (lit < 128) op_high = @as(u64, 1) << @as(u6, @intCast(lit - 64));
+                    if (lit < 64) op_low = @as(u64, 1) << @as(u6, @intCast(lit)) else if (lit < 128) op_high = @as(u64, 1) << @as(u6, @intCast(lit - 64));
                 },
                 .char_class => |cc| {
                     if (cc.negated) {
@@ -198,8 +210,16 @@ pub const FastRegex = struct {
         var has_unlimited = false;
         for (final_ops) |op| {
             min_w += op.min;
-            if (op.max == 0) { has_unlimited = true; } else { max_w += op.max; }
-            if (op.min != op.max or op.max == 0) { is_fixed = false; } else { fw += op.min; }
+            if (op.max == 0) {
+                has_unlimited = true;
+            } else {
+                max_w += op.max;
+            }
+            if (op.min != op.max or op.max == 0) {
+                is_fixed = false;
+            } else {
+                fw += op.min;
+            }
         }
         return FastRegex{
             .ops = final_ops,
@@ -262,7 +282,10 @@ pub const FastRegex = struct {
                     if (op.max == 0) {
                         while (pos < input.len and op.matchChar(input[pos])) pos += 1;
                     } else {
-                        while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
+                        while (count < op.max and pos < input.len and op.matchChar(input[pos])) {
+                            pos += 1;
+                            count += 1;
+                        }
                     }
                 } else {
                     // Literal IN class: greedy scan then reverse search for literal
@@ -270,7 +293,10 @@ pub const FastRegex = struct {
                     if (op.max == 0) {
                         while (pos < input.len and op.matchChar(input[pos])) pos += 1;
                     } else {
-                        while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
+                        while (count < op.max and pos < input.len and op.matchChar(input[pos])) {
+                            pos += 1;
+                            count += 1;
+                        }
                     }
                     // Check if literal is right after greedy range
                     if (pos < input.len and input[pos] == next_lit) {
@@ -280,7 +306,10 @@ pub const FastRegex = struct {
                         var found = false;
                         while (pos > greedy_start) {
                             pos -= 1;
-                            if (input[pos] == next_lit) { found = true; break; }
+                            if (input[pos] == next_lit) {
+                                found = true;
+                                break;
+                            }
                         }
                         if (!found) return null;
                     }
@@ -292,7 +321,10 @@ pub const FastRegex = struct {
             if (op.max == 0) {
                 while (pos < input.len and op.matchChar(input[pos])) pos += 1;
             } else {
-                while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
+                while (count < op.max and pos < input.len and op.matchChar(input[pos])) {
+                    pos += 1;
+                    count += 1;
+                }
             }
             oi += 1;
         }
@@ -315,7 +347,10 @@ pub const FastRegex = struct {
                 var ok = true;
                 var count: u16 = 0;
                 while (count < op.min) {
-                    if (pos >= input.len or !op.matchChar(input[pos])) { ok = false; break; }
+                    if (pos >= input.len or !op.matchChar(input[pos])) {
+                        ok = false;
+                        break;
+                    }
                     pos += 1;
                     count += 1;
                 }
@@ -326,7 +361,10 @@ pub const FastRegex = struct {
                 if (op.max == 0) {
                     while (pos < input.len and op.matchChar(input[pos])) pos += 1;
                 } else {
-                    while (count < op.max and pos < input.len and op.matchChar(input[pos])) { pos += 1; count += 1; }
+                    while (count < op.max and pos < input.len and op.matchChar(input[pos])) {
+                        pos += 1;
+                        count += 1;
+                    }
                 }
 
                 // Push backtrack point if greedy consumed extra chars
@@ -402,17 +440,22 @@ pub const FastRegex = struct {
     fn digitClass() CharClass {
         var cc = CharClass{};
         for ('0'..'9' + 1) |ch| {
-            if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch))
-            else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
+            if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
         }
         return cc;
     }
 
     fn wordClass() CharClass {
         var cc = CharClass{};
-        for ('a'..'z' + 1) |ch| { if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64)); }
-        for ('A'..'Z' + 1) |ch| { if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64)); }
-        for ('0'..'9' + 1) |ch| { if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64)); }
+        for ('a'..'z' + 1) |ch| {
+            if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
+        }
+        for ('A'..'Z' + 1) |ch| {
+            if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
+        }
+        for ('0'..'9' + 1) |ch| {
+            if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
+        }
         cc.high |= @as(u64, 1) << @as(u6, @intCast('_' - 64));
         return cc;
     }
@@ -443,10 +486,28 @@ pub const FastRegex = struct {
         while (i < pattern.len and pattern[i] != ']') {
             if (pattern[i] == '\\' and i + 1 < pattern.len) {
                 switch (pattern[i + 1]) {
-                    'd' => { const d = digitClass(); cc.low |= d.low; cc.high |= d.high; i += 2; },
-                    'w' => { const w = wordClass(); cc.low |= w.low; cc.high |= w.high; i += 2; },
-                    's' => { const s = spaceClass(); cc.low |= s.low; cc.high |= s.high; i += 2; },
-                    else => |esc| { setBit(&cc, esc); i += 2; },
+                    'd' => {
+                        const d = digitClass();
+                        cc.low |= d.low;
+                        cc.high |= d.high;
+                        i += 2;
+                    },
+                    'w' => {
+                        const w = wordClass();
+                        cc.low |= w.low;
+                        cc.high |= w.high;
+                        i += 2;
+                    },
+                    's' => {
+                        const s = spaceClass();
+                        cc.low |= s.low;
+                        cc.high |= s.high;
+                        i += 2;
+                    },
+                    else => |esc| {
+                        setBit(&cc, esc);
+                        i += 2;
+                    },
                 }
             } else if (i + 2 < pattern.len and pattern[i + 1] == '-' and pattern[i + 2] != ']' and pattern[i + 2] != '\\') {
                 const start = pattern[i];
@@ -468,8 +529,7 @@ pub const FastRegex = struct {
 
     fn setBit(cc: *CharClass, ch: u8) void {
         if (ch >= 128) return;
-        if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch))
-        else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
+        if (ch < 64) cc.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else cc.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
     }
 
     fn parseQuantifier(pattern: []const u8, pos: *usize) ?struct { min: u16, max: u16 } {

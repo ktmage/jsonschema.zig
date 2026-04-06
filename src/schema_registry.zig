@@ -653,7 +653,9 @@ fn findAnchorInSchema(schema: std.json.Value, anchor_name: []const u8, base_uri:
 fn percentDecode(input: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, input, '%') == null) return input;
     // Use threadlocal static buffer to avoid dangling stack pointer
-    const S = struct { threadlocal var buf: [4096]u8 = undefined; };
+    const S = struct {
+        threadlocal var buf: [4096]u8 = undefined;
+    };
     var len: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
@@ -687,22 +689,33 @@ fn hexVal(c: u8) ?u8 {
 
 fn unescapeToken(token: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, token, '~') == null) return token;
-    const S = struct { threadlocal var buf: [4096]u8 = undefined; };
+    const S = struct {
+        threadlocal var buf: [4096]u8 = undefined;
+    };
     var len: usize = 0;
     var i: usize = 0;
     while (i < token.len) {
         if (token[i] == '~' and i + 1 < token.len) {
             if (token[i + 1] == '1') {
-                if (len < S.buf.len) { S.buf[len] = '/'; len += 1; }
+                if (len < S.buf.len) {
+                    S.buf[len] = '/';
+                    len += 1;
+                }
                 i += 2;
                 continue;
             } else if (token[i + 1] == '0') {
-                if (len < S.buf.len) { S.buf[len] = '~'; len += 1; }
+                if (len < S.buf.len) {
+                    S.buf[len] = '~';
+                    len += 1;
+                }
                 i += 2;
                 continue;
             }
         }
-        if (len < S.buf.len) { S.buf[len] = token[i]; len += 1; }
+        if (len < S.buf.len) {
+            S.buf[len] = token[i];
+            len += 1;
+        }
         i += 1;
     }
     return S.buf[0..len];

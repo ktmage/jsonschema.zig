@@ -384,7 +384,6 @@ pub const Context = struct {
 /// Keyword validator function signature.
 pub const KeywordValidator = *const fn (ctx: Context) void;
 
-
 /// Registry of keyword validators.
 /// Each keyword maps to a validation function.
 /// To add a new keyword, add an entry to this table and create the
@@ -454,27 +453,25 @@ fn isDraft2020x(root_schema: std.json.Value) bool {
 
 /// Keywords that belong to the validation vocabulary.
 const validation_keywords = [_][]const u8{
-    "type",           "enum",         "const",
-    "multipleOf",     "maximum",      "exclusiveMaximum",
-    "minimum",        "exclusiveMinimum",
-    "maxLength",      "minLength",    "pattern",
-    "maxItems",       "minItems",     "uniqueItems",
-    "maxContains",    "minContains",
-    "maxProperties",  "minProperties", "required",
-    "dependentRequired",
+    "type",        "enum",              "const",
+    "multipleOf",  "maximum",           "exclusiveMaximum",
+    "minimum",     "exclusiveMinimum",  "maxLength",
+    "minLength",   "pattern",           "maxItems",
+    "minItems",    "uniqueItems",       "maxContains",
+    "minContains", "maxProperties",     "minProperties",
+    "required",    "dependentRequired",
 };
 
 pub fn isValidationKeyword(name: []const u8) bool {
     @setEvalBranchQuota(100000);
     const map = std.StaticStringMap(void).initComptime(.{
-        .{ "type", {} },           .{ "enum", {} },         .{ "const", {} },
-        .{ "multipleOf", {} },     .{ "maximum", {} },      .{ "exclusiveMaximum", {} },
-        .{ "minimum", {} },        .{ "exclusiveMinimum", {} },
-        .{ "maxLength", {} },      .{ "minLength", {} },    .{ "pattern", {} },
-        .{ "maxItems", {} },       .{ "minItems", {} },     .{ "uniqueItems", {} },
-        .{ "maxContains", {} },    .{ "minContains", {} },
-        .{ "maxProperties", {} },  .{ "minProperties", {} }, .{ "required", {} },
-        .{ "dependentRequired", {} },
+        .{ "type", {} },        .{ "enum", {} },              .{ "const", {} },
+        .{ "multipleOf", {} },  .{ "maximum", {} },           .{ "exclusiveMaximum", {} },
+        .{ "minimum", {} },     .{ "exclusiveMinimum", {} },  .{ "maxLength", {} },
+        .{ "minLength", {} },   .{ "pattern", {} },           .{ "maxItems", {} },
+        .{ "minItems", {} },    .{ "uniqueItems", {} },       .{ "maxContains", {} },
+        .{ "minContains", {} }, .{ "maxProperties", {} },     .{ "minProperties", {} },
+        .{ "required", {} },    .{ "dependentRequired", {} },
     });
     return map.has(name);
 }
@@ -589,9 +586,7 @@ pub fn validateAll(ctx: Context) void {
                             .null => (mask & 1) != 0,
                             .bool => (mask & 2) != 0,
                             .integer => (mask & (4 | 8)) != 0,
-                            .float => |f| if ((mask & 8) != 0) true
-                            else if ((mask & 4) != 0 and (mask & 8) == 0) @floor(f) == f and !std.math.isNan(f) and !std.math.isInf(f)
-                            else false,
+                            .float => |f| if ((mask & 8) != 0) true else if ((mask & 4) != 0 and (mask & 8) == 0) @floor(f) == f and !std.math.isNan(f) and !std.math.isInf(f) else false,
                             .string => (mask & 16) != 0,
                             .array => (mask & 32) != 0,
                             .object => (mask & 64) != 0,
@@ -988,7 +983,10 @@ pub fn validateAll(ctx: Context) void {
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip) {
                                     if (snode.isValidFast(ctx.instance, compiled)) |result| {
-                                        if (result) { found = true; break; }
+                                        if (result) {
+                                            found = true;
+                                            break;
+                                        }
                                         continue;
                                     }
                                 }
@@ -1095,14 +1093,16 @@ pub fn validateAll(ctx: Context) void {
                                         if (enode.always_valid) continue;
                                         if (enode.simple_type != .none) {
                                             if (matchesSimpleType(val, enode.simple_type)) continue;
-                                            need_slow = true; break;
+                                            need_slow = true;
+                                            break;
                                         }
                                         // Inline 1-validator patterns to skip isValidFast call
                                         if (enode.ref_overrides and enode.validators.len == 1) {
                                             if (compiled_mod.isValidatorValid(enode.validators[0], val, compiled)) |result| {
                                                 if (result) continue;
                                             }
-                                            need_slow = true; break;
+                                            need_slow = true;
+                                            break;
                                         }
                                         if (!enode.has_id or ctx.registry == null) {
                                             if (enode.isValidFast(val, compiled)) |result| {
@@ -1160,7 +1160,10 @@ pub fn validateAll(ctx: Context) void {
                                 for (inst_obj.keys()) |key| {
                                     var found = false;
                                     for (of.properties) |entry| {
-                                        if (std.mem.eql(u8, key, entry.name)) { found = true; break; }
+                                        if (std.mem.eql(u8, key, entry.name)) {
+                                            found = true;
+                                            break;
+                                        }
                                     }
                                     if (!found) {
                                         ctx.addError("additionalProperties", "");
@@ -1427,7 +1430,10 @@ pub fn validateAll(ctx: Context) void {
                                     (!cnode.has_id and ctx.registry == null);
                                 if (can_skip_c) {
                                     if (cnode.isValidFast(item, compiled)) |result| {
-                                        if (result) { match_count += 1; continue; }
+                                        if (result) {
+                                            match_count += 1;
+                                            continue;
+                                        }
                                         continue;
                                     }
                                 }
