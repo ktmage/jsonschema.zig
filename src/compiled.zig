@@ -107,6 +107,17 @@ pub const CompiledSchema = struct {
             }
         }
 
+        // Re-link all nodes to resolve circular/late-bound $ref within the root schema
+        {
+            var node_it = node_map.iterator();
+            while (node_it.next()) |entry| {
+                const node = entry.value_ptr.*;
+                for (node.validators) |*v| {
+                    relinkValidator(v, &node_map);
+                }
+            }
+        }
+
         // Post-process: selectively disable needs_uri_resolution for nodes
         // whose $ref targets are fully inlinable by isValidFast.
         optimizeRefResolution(schema, &node_map);
@@ -1271,7 +1282,7 @@ fn isValid_unevaluated_properties_compiled(data: *allowzero const anyopaque, ins
     return true;
 }
 
-fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
+fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, alloc: Allocator) ?bool {
     const cr: *const CompiledRegex = @ptrCast(@alignCast(data));
     const instance_str = switch (instance) {
         .string => |s| s,
@@ -1307,6 +1318,10 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
             buf[instance_str.len] = 0;
             return c.regexec(regex, &buf, 0, null, 0) == 0;
         }
+        // Long strings: use allocator for null-terminated copy
+        const str_z = alloc.dupeZ(u8, instance_str) catch return null;
+        defer alloc.free(str_z);
+        return c.regexec(regex, str_z.ptr, 0, null, 0) == 0;
     }
     return null;
 }
