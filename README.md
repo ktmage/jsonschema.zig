@@ -1,10 +1,11 @@
 # jsonschema.zig
 
-> **Note**: This is an experimental project where [Claude Code](https://claude.ai/claude-code) autonomously wrote all of the code — architecture, spec compliance, keyword logic, performance optimizations, tests, and this README. No human-written code; human involvement was limited to deciding project direction.
+> [!NOTE]
+> This entire project — code, tests, optimizations, benchmarks, and this README — was written by [Claude Code](https://claude.ai/claude-code). Human involvement was limited to directing what to build. We've audited for correctness (17 bugs found and fixed), but there may still be issues with the validator or benchmarks. **Take these numbers with a grain of salt.** If you spot anything off, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — we'll fix it fast.
 
 A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant**, zero external dependencies, and built for performance.
 
-**Warm mode** — schema pre-compiled, 550 instances × 100 iterations:
+**Warm mode** — schema pre-compiled, 550 instances × 100 iterations ([methodology](#benchmark-details)):
 
 | Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
 |---------|----:|-----:|---:|----:|-------:|
@@ -30,19 +31,16 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 | package-json | **1.5 ms** | 201 ms | 1,130 ms | — | 36 ms |
 | cspell | **2.1 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
 
-> [!NOTE]
-> This project was built almost entirely by [Claude Code](https://claude.ai/claude-code) — including the benchmark methodology, optimizations, and these measurements. While we've audited for correctness (17 bugs found and fixed) and tried to ensure fair comparisons, there may still be issues: unfair benchmark configurations, unintentional shortcuts in the validator, or measurement methodology problems. **Take these numbers with a grain of salt.** If you spot anything off, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — we'll fix it fast.
-
 <details>
-<summary>Benchmark details</summary>
+<summary id="benchmark-details">Benchmark details</summary>
 
 - **Machine**: Apple M4 Pro (12 cores, 48GB RAM), macOS 15.5
 - **Isolation**: Docker containers per language
-- **Libraries**: Rust [jsonschema](https://crates.io/crates/jsonschema) 0.28.3, Go [santhosh-tekuri/jsonschema](https://github.com/santhosh-tekuri/jsonschema) v6, JS [Ajv](https://ajv.js.org/) 8.17, Python [jsonschema](https://pypi.org/project/jsonschema/) 4.23
+- **Method**: Median of 5 runs, 100 warm iterations, boolean-only validation (`is_valid`), format validation disabled
 - **Schemas**: Real-world schemas from [SchemaStore](https://www.schemastore.org/), [OpenAPI Initiative](https://www.openapis.org/), [GeoJSON](https://geojson.org/)
 - **Instances**: Synthetically generated (500 valid + 50 invalid per dataset, deterministic seed)
-- **"—"** means the library failed to compile or validate the schema
-- Reproduction: [github.com/ktmage/jsonschema-bench](https://github.com/ktmage/jsonschema-bench)
+- **"—"** = the library failed to compile or validate the schema
+- **Reproduction**: [github.com/ktmage/jsonschema-bench](https://github.com/ktmage/jsonschema-bench)
 
 </details>
 
