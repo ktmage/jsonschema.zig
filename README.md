@@ -146,7 +146,7 @@ Benchmarked against major JSON Schema validators across 5 languages. All measure
 
 **Warm mode** (schema pre-compiled, repeated validation) — lower is better:
 
-| Dataset | Zig | Rust | Go | JavaScript | Python |
+| Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
 |---------|----:|-----:|---:|-----------:|-------:|
 | helm-chart-lock | **9 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
 | dependabot | **17 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
@@ -159,7 +159,7 @@ Benchmarked against major JSON Schema validators across 5 languages. All measure
 
 **Cold mode** (schema compilation + single validation pass):
 
-| Dataset | Zig | Rust | Go | JavaScript | Python |
+| Dataset | jsonschema.zig | jsonschema (Rust) | jsonschema (Go) | Ajv (JS) | jsonschema (Python) |
 |---------|----:|-----:|---:|-----------:|-------:|
 | helm-chart-lock | **0.1 ms** | 14 ms | 95 ms | 222 ms | 25 ms |
 | dependabot | **0.2 ms** | 54 ms | 263 ms | 582 ms | 28 ms |
@@ -169,6 +169,9 @@ Benchmarked against major JSON Schema validators across 5 languages. All measure
 | github-workflow | **2.1 ms** | 568 ms | 1,834 ms | 7,604 ms | 225 ms |
 | package-json | **1.5 ms** | 201 ms | 1,130 ms | — | 36 ms |
 | cspell | **2.1 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
+
+> [!NOTE]
+> This project was built almost entirely by [Claude Code](https://claude.ai/claude-code) — including the benchmark methodology, optimizations, and these measurements. While we've audited for correctness (17 bugs found and fixed) and tried to ensure fair comparisons, there may still be issues: unfair benchmark configurations, unintentional shortcuts in the validator, or measurement methodology problems. **Take these numbers with a grain of salt.** If you spot anything off, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — we'll fix it fast.
 
 <details>
 <summary>Benchmark details</summary>
