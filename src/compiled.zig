@@ -136,7 +136,13 @@ pub const CompiledSchema = struct {
     }
 
     pub fn deinit(self: *CompiledSchema) void {
-        // No POSIX regex_t cleanup needed — regexes are compiled on-demand at validation time
+        // Free cached POSIX regex_t allocations
+        for (self.compiled_regexes) |cr| {
+            if (cr.cached_regex) |regex| {
+                c.regfree(regex);
+                cFreeRegex(regex);
+            }
+        }
         self.arena.deinit();
     }
 };
@@ -355,6 +361,8 @@ pub const CharClassMode = enum { first_char, all_chars, all_chars_optional };
 pub const CompiledRegex = struct {
     /// Raw pattern string for POSIX regex fallback (compiled on-demand at validation time)
     pattern_z: ?[*:0]const u8 = null,
+    /// Cached compiled POSIX regex (heap-allocated via C malloc, compiled on first use)
+    cached_regex: ?*c.regex_t = null,
     valid: bool,
     /// Fast bytecode-compiled regex (11x faster than POSIX, handles \d \w \s)
     fast: ?FastRegex = null,
@@ -400,12 +408,8 @@ pub const CompiledRegex = struct {
         if (self.char_class) |bm| return matchesCharClass(str, bm, self.char_class_mode);
         // Fast bytecode regex (no allocation, 11x faster than POSIX)
         if (self.fast) |*fast| return fast.matches(str);
-        // POSIX fallback: compile regex on-demand from stored pattern string
-        if (self.pattern_z) |pat_z| {
-            const regex = cMallocRegex() orelse return false;
-            defer cFreeRegex(regex);
-            if (c.regcomp(regex, pat_z, c.REG_EXTENDED | c.REG_NOSUB) != 0) return false;
-            defer c.regfree(regex);
+        // POSIX fallback: use pre-compiled cached regex
+        if (self.cached_regex) |regex| {
             if (str.len < 512) {
                 var buf: [512]u8 = undefined;
                 @memcpy(buf[0..str.len], str);
@@ -1273,12 +1277,8 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
     if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
     if (cr.fast) |*fast| return fast.matches(instance_str);
     if (!cr.valid) return null; // regex compile failed, can't validate in fast path
-    // POSIX fallback: compile on-demand
-    if (cr.pattern_z) |pat_z| {
-        const regex = cMallocRegex() orelse return null;
-        defer cFreeRegex(regex);
-        if (c.regcomp(regex, pat_z, c.REG_EXTENDED | c.REG_NOSUB) != 0) return null;
-        defer c.regfree(regex);
+    // POSIX fallback: use pre-compiled cached regex
+    if (cr.cached_regex) |regex| {
         if (instance_str.len < 512) {
             var buf: [512]u8 = undefined;
             @memcpy(buf[0..instance_str.len], instance_str);
@@ -2926,6 +2926,7 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
         else => return null,
     };
     const cr = alloc.create(CompiledRegex) catch return null;
+    cr.cached_regex = null;
     cr.simple_prefix = detectSimplePrefix(pattern_str) orelse detectEscapedPrefix(alloc, pattern_str);
     cr.is_identifier = isIdentifierPattern(pattern_str);
     cr.char_class = null;
@@ -2947,15 +2948,16 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     // Convert ECMA-262 shortcuts (\d, \w, \s) to POSIX ERE equivalents
     const posix_pattern = convertEcmaToPostfix(alloc, pattern_str) catch pattern_str;
     const pattern_z = alloc.dupeZ(u8, posix_pattern) catch return null;
-    // Store null-terminated pattern for on-demand POSIX regex compilation
+    // Compile and cache the POSIX regex at compile time (avoids per-match regcomp)
     cr.pattern_z = pattern_z.ptr;
-    // Test-compile to check validity (don't store the regex_t)
-    const test_regex = cMallocRegex();
-    if (test_regex) |tr| {
-        const comp_result = c.regcomp(tr, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-        cr.valid = comp_result == 0;
-        if (cr.valid) c.regfree(tr);
-        cFreeRegex(tr);
+    if (cMallocRegex()) |rp| {
+        if (c.regcomp(rp, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
+            cr.cached_regex = rp;
+            cr.valid = true;
+        } else {
+            cFreeRegex(rp);
+            cr.valid = false;
+        }
     } else {
         cr.valid = false;
     }
@@ -3359,6 +3361,7 @@ fn compilePatternProperties(
         const posix_pat = convertEcmaToPostfix(alloc, pattern) catch pattern;
         const pattern_z = alloc.dupeZ(u8, posix_pat) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
+        cr.cached_regex = null;
         cr.pattern_z = pattern_z.ptr;
         cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
         cr.is_identifier = isIdentifierPattern(pattern);
@@ -3376,12 +3379,14 @@ fn compilePatternProperties(
                 cr.ci_literal = ci;
             }
         }
-        const test_regex2 = cMallocRegex();
-        if (test_regex2) |tr2| {
-            const comp_result = c.regcomp(tr2, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-            cr.valid = comp_result == 0;
-            if (cr.valid) c.regfree(tr2);
-            cFreeRegex(tr2);
+        if (cMallocRegex()) |rp2| {
+            if (c.regcomp(rp2, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
+                cr.cached_regex = rp2;
+                cr.valid = true;
+            } else {
+                cFreeRegex(rp2);
+                cr.valid = false;
+            }
         } else {
             cr.valid = false;
         }
@@ -3631,6 +3636,7 @@ fn collectStaticCeiling(
                 const posix_pat2 = convertEcmaToPostfix(alloc, pattern) catch pattern;
                 const pattern_z = alloc.dupeZ(u8, posix_pat2) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
+                cr.cached_regex = null;
                 cr.pattern_z = pattern_z.ptr;
                 cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
                 cr.is_identifier = isIdentifierPattern(pattern);
@@ -3646,12 +3652,14 @@ fn collectStaticCeiling(
                         cr.literal_set = lset;
                     }
                 }
-                const test_regex3 = cMallocRegex();
-                if (test_regex3) |tr3| {
-                    const comp_result = c.regcomp(tr3, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-                    cr.valid = comp_result == 0;
-                    if (cr.valid) c.regfree(tr3);
-                    cFreeRegex(tr3);
+                if (cMallocRegex()) |rp3| {
+                    if (c.regcomp(rp3, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
+                        cr.cached_regex = rp3;
+                        cr.valid = true;
+                    } else {
+                        cFreeRegex(rp3);
+                        cr.valid = false;
+                    }
                 } else {
                     cr.valid = false;
                 }
