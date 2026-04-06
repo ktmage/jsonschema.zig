@@ -4,7 +4,7 @@
 
 A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant**, zero external dependencies, and built for performance.
 
-**Warm mode** — schema pre-compiled, 550 instances × 100 iterations ([details](#performance)):
+**Warm mode** — schema pre-compiled, 550 instances × 100 iterations:
 
 | Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
 |---------|----:|-----:|---:|----:|-------:|
@@ -16,6 +16,35 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 | github-workflow | 66 ms | **56 ms** | 1,259 ms | 300 ms | 21,693 ms |
 | package-json | **41 ms** | — | — | — | 3,163 ms |
 | cspell | **76 ms** | — | — | 244 ms | 5,468 ms |
+
+**Cold mode** — schema compilation + single validation pass:
+
+| Dataset | jsonschema.zig | jsonschema (Rust) | jsonschema (Go) | Ajv (JS) | jsonschema (Python) |
+|---------|----:|-----:|---:|----:|-------:|
+| helm-chart-lock | **0.1 ms** | 14 ms | 95 ms | 222 ms | 25 ms |
+| dependabot | **0.2 ms** | 54 ms | 263 ms | 582 ms | 28 ms |
+| geojson | **0.9 ms** | 326 ms | 1,599 ms | 7,726 ms | 294 ms |
+| openapi | **15 ms** | 12,262 ms | 1,886 ms | 4,176 ms | 3,381 ms |
+| tsconfig | **1.5 ms** | 2,196 ms | 2,014 ms | — | 50 ms |
+| github-workflow | **2.1 ms** | 568 ms | 1,834 ms | 7,604 ms | 225 ms |
+| package-json | **1.5 ms** | 201 ms | 1,130 ms | — | 36 ms |
+| cspell | **2.1 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
+
+> [!NOTE]
+> This project was built almost entirely by [Claude Code](https://claude.ai/claude-code) — including the benchmark methodology, optimizations, and these measurements. While we've audited for correctness (17 bugs found and fixed) and tried to ensure fair comparisons, there may still be issues: unfair benchmark configurations, unintentional shortcuts in the validator, or measurement methodology problems. **Take these numbers with a grain of salt.** If you spot anything off, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — we'll fix it fast.
+
+<details>
+<summary>Benchmark details</summary>
+
+- **Machine**: Apple M4 Pro (12 cores, 48GB RAM), macOS 15.5
+- **Isolation**: Docker containers per language
+- **Libraries**: Rust [jsonschema](https://crates.io/crates/jsonschema) 0.28.3, Go [santhosh-tekuri/jsonschema](https://github.com/santhosh-tekuri/jsonschema) v6, JS [Ajv](https://ajv.js.org/) 8.17, Python [jsonschema](https://pypi.org/project/jsonschema/) 4.23
+- **Schemas**: Real-world schemas from [SchemaStore](https://www.schemastore.org/), [OpenAPI Initiative](https://www.openapis.org/), [GeoJSON](https://geojson.org/)
+- **Instances**: Synthetically generated (500 valid + 50 invalid per dataset, deterministic seed)
+- **"—"** means the library failed to compile or validate the schema
+- Reproduction: [github.com/ktmage/jsonschema-bench](https://github.com/ktmage/jsonschema-bench)
+
+</details>
 
 - **Full specification coverage**: Draft 7 (920/920 tests) and Draft 2020-12 (1142/1142 tests) with 100% pass rate against the official [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
 - **Zero dependencies**: Pure Zig, only `std` — no C libraries, no allocator hacks
@@ -152,39 +181,6 @@ for (result.errors) |err| {
     // err.message       — human-readable description
 }
 ```
-
-## Performance
-
-Benchmarked against major JSON Schema validators across 5 languages. All measurements use Docker containers, median of 5 runs, 100 warm iterations, boolean-only validation (`is_valid`), 550 synthetically generated instances per dataset (500 valid + 50 invalid). See [warm mode table above](#jsonschemazig) for full results.
-
-**Cold mode** (schema compilation + single validation pass):
-
-| Dataset | jsonschema.zig | jsonschema (Rust) | jsonschema (Go) | Ajv (JS) | jsonschema (Python) |
-|---------|----:|-----:|---:|-----------:|-------:|
-| helm-chart-lock | **0.1 ms** | 14 ms | 95 ms | 222 ms | 25 ms |
-| dependabot | **0.2 ms** | 54 ms | 263 ms | 582 ms | 28 ms |
-| geojson | **0.9 ms** | 326 ms | 1,599 ms | 7,726 ms | 294 ms |
-| openapi | **15 ms** | 12,262 ms | 1,886 ms | 4,176 ms | 3,381 ms |
-| tsconfig | **1.5 ms** | 2,196 ms | 2,014 ms | — | 50 ms |
-| github-workflow | **2.1 ms** | 568 ms | 1,834 ms | 7,604 ms | 225 ms |
-| package-json | **1.5 ms** | 201 ms | 1,130 ms | — | 36 ms |
-| cspell | **2.1 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
-
-> [!NOTE]
-> This project was built almost entirely by [Claude Code](https://claude.ai/claude-code) — including the benchmark methodology, optimizations, and these measurements. While we've audited for correctness (17 bugs found and fixed) and tried to ensure fair comparisons, there may still be issues: unfair benchmark configurations, unintentional shortcuts in the validator, or measurement methodology problems. **Take these numbers with a grain of salt.** If you spot anything off, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — we'll fix it fast.
-
-<details>
-<summary>Benchmark details</summary>
-
-- **Machine**: Apple M4 Pro (12 cores, 48GB RAM), macOS 15.5
-- **Isolation**: Docker containers per language
-- **Libraries**: Rust [jsonschema](https://crates.io/crates/jsonschema) 0.28.3, Go [santhosh-tekuri/jsonschema](https://github.com/santhosh-tekuri/jsonschema) v6, JS [Ajv](https://ajv.js.org/) 8.17, Python [jsonschema](https://pypi.org/project/jsonschema/) 4.23
-- **Schemas**: Real-world schemas from [SchemaStore](https://www.schemastore.org/), [OpenAPI Initiative](https://www.openapis.org/), [GeoJSON](https://geojson.org/)
-- **Instances**: Synthetically generated (500 valid + 50 invalid per dataset, deterministic seed)
-- **"—"** means the library failed to compile or validate the schema
-- Reproduction: [github.com/ktmage/jsonschema-bench](https://github.com/ktmage/jsonschema-bench)
-
-</details>
 
 ## Building & Testing
 
