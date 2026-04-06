@@ -2768,8 +2768,8 @@ fn tryMergeObjectFast(alloc: Allocator, validators: *std.ArrayList(CompiledValid
     if (required_data) |req_names| {
         for (req_names) |req_name| {
             for (properties_data.?, 0..) |entry, pi| {
-                if (pi >= 64) break;
                 if (std.mem.eql(u8, req_name, entry.name)) {
+                    if (pi >= 64) return; // Can't track required at index >= 64 in bitmask
                     required_mask |= (@as(u64, 1) << @as(u6, @intCast(pi)));
                     break;
                 }
