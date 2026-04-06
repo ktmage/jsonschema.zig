@@ -147,6 +147,9 @@ pub const SchemaRegistry = struct {
     /// Parsed metaschema (kept alive for the lifetime of the registry)
     metaschema_parsed: ?std.json.Parsed(std.json.Value) = null,
     metaschema_2020_parsed: ?std.json.Parsed(std.json.Value) = null,
+    /// Parsed remote schemas that need to stay alive (owned by registry).
+    remote_parsed: std.ArrayList(std.json.Parsed(std.json.Value)) = .{ .items = &.{}, .capacity = 0, .allocator = undefined },
+    remote_parsed_init: bool = false,
 
     pub fn init(allocator: Allocator) SchemaRegistry {
         return .{
@@ -159,6 +162,10 @@ pub const SchemaRegistry = struct {
     pub fn deinit(self: *SchemaRegistry) void {
         if (self.metaschema_parsed) |p| p.deinit();
         if (self.metaschema_2020_parsed) |p| p.deinit();
+        if (self.remote_parsed_init) {
+            for (self.remote_parsed.items) |p| p.deinit();
+            self.remote_parsed.deinit();
+        }
         self.schemas.deinit();
         self.anchors.deinit();
     }
@@ -207,6 +214,54 @@ pub const SchemaRegistry = struct {
     pub fn addSchema(self: *SchemaRegistry, uri: []const u8, schema: std.json.Value) void {
         const key = self.allocator.dupe(u8, uri) catch return;
         self.schemas.put(key, schema) catch return;
+    }
+
+    /// Fetch a remote schema via HTTP/HTTPS and register it.
+    /// Returns the parsed schema value, or null on failure.
+    pub fn fetchAndAdd(self: *SchemaRegistry, uri: []const u8) ?std.json.Value {
+        // Only support http:// and https:// URIs
+        if (!std.mem.startsWith(u8, uri, "http://") and !std.mem.startsWith(u8, uri, "https://")) return null;
+
+        // Check if already registered
+        const stripped = stripFragment(uri);
+        if (self.schemas.get(stripped) != null) return self.schemas.get(stripped);
+
+        // Initialize remote_parsed list on first use
+        if (!self.remote_parsed_init) {
+            self.remote_parsed = std.ArrayList(std.json.Parsed(std.json.Value)).init(self.allocator);
+            self.remote_parsed_init = true;
+        }
+
+        // Fetch via HTTP
+        var client = std.http.Client{ .allocator = self.allocator };
+        defer client.deinit();
+
+        const parsed_uri = std.Uri.parse(stripped) catch return null;
+
+        var buf: [4096]u8 = undefined;
+        var req = client.open(.GET, parsed_uri, .{ .server_header_buffer = &buf }) catch return null;
+        defer req.deinit();
+        req.send() catch return null;
+        req.wait() catch return null;
+
+        if (req.status != .ok) return null;
+
+        const body = req.reader().readAllAlloc(self.allocator, 10 * 1024 * 1024) catch return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch {
+            self.allocator.free(body);
+            return null;
+        };
+
+        self.remote_parsed.append(parsed) catch {
+            parsed.deinit();
+            self.allocator.free(body);
+            return null;
+        };
+
+        self.addSchema(stripped, parsed.value);
+        self.scanIds(stripped, parsed.value);
+        return parsed.value;
     }
 
     /// Scan a schema tree for $id declarations and register them.
