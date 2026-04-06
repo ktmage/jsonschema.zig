@@ -10,7 +10,10 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
+    const one_of = @import("one_of.zig");
     for (sub_schemas) |sub_schema| {
+        // Quick pre-check: skip sub-schemas that can't possibly match
+        if (!one_of.couldMatch(sub_schema, ctx.instance)) continue;
         if (ctx.isSubschemaValid(sub_schema, ctx.instance)) {
             return; // at least one matched
         }

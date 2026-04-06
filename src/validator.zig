@@ -465,11 +465,18 @@ const validation_keywords = [_][]const u8{
 };
 
 pub fn isValidationKeyword(name: []const u8) bool {
-    @setEvalBranchQuota(10000);
-    for (validation_keywords) |vk| {
-        if (std.mem.eql(u8, name, vk)) return true;
-    }
-    return false;
+    @setEvalBranchQuota(100000);
+    const map = std.StaticStringMap(void).initComptime(.{
+        .{ "type", {} },           .{ "enum", {} },         .{ "const", {} },
+        .{ "multipleOf", {} },     .{ "maximum", {} },      .{ "exclusiveMaximum", {} },
+        .{ "minimum", {} },        .{ "exclusiveMinimum", {} },
+        .{ "maxLength", {} },      .{ "minLength", {} },    .{ "pattern", {} },
+        .{ "maxItems", {} },       .{ "minItems", {} },     .{ "uniqueItems", {} },
+        .{ "maxContains", {} },    .{ "minContains", {} },
+        .{ "maxProperties", {} },  .{ "minProperties", {} }, .{ "required", {} },
+        .{ "dependentRequired", {} },
+    });
+    return map.has(name);
 }
 
 /// Check if the validation vocabulary is disabled by a custom metaschema.
@@ -576,14 +583,20 @@ pub fn validateAll(ctx: Context) void {
                         }
                     },
                     .type_multi => {
-                        const types_w: *const compiled_mod.CompiledValidator.SimpleTypeSliceWrapper = v.getData(*const compiled_mod.CompiledValidator.SimpleTypeSliceWrapper);
-                        var matched = false;
-                        for (types_w.items) |st| {
-                            if (matchesSimpleType(ctx.instance, st)) {
-                                matched = true;
-                                break;
-                            }
-                        }
+                        // Data is an inline u8 bitmask
+                        const mask = @as(u8, @intCast(compiled_mod.CompiledValidator.extractU64(v.data) & 0xFF));
+                        const matched = switch (ctx.instance) {
+                            .null => (mask & 1) != 0,
+                            .bool => (mask & 2) != 0,
+                            .integer => (mask & (4 | 8)) != 0,
+                            .float => |f| if ((mask & 8) != 0) true
+                            else if ((mask & 4) != 0 and (mask & 8) == 0) @floor(f) == f and !std.math.isNan(f) and !std.math.isInf(f)
+                            else false,
+                            .string => (mask & 16) != 0,
+                            .array => (mask & 32) != 0,
+                            .object => (mask & 64) != 0,
+                            .number_string => (mask & 8) != 0,
+                        };
                         if (!matched) {
                             ctx.addError("type", "Instance does not match any of the expected types");
                         }

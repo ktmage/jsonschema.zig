@@ -607,11 +607,20 @@ fn isValid_type_single(data: *allowzero const anyopaque, instance: std.json.Valu
 }
 
 fn isValid_type_multi(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
-    const w: *const CompiledValidator.SimpleTypeSliceWrapper = @ptrCast(@alignCast(data));
-    for (w.items) |st| {
-        if (Validator.matchesSimpleType(instance, st)) return true;
-    }
-    return false;
+    const mask = @as(u8, @intCast(CompiledValidator.extractU64(data) & 0xFF));
+    const has_integer = (mask & 4) != 0 and (mask & 8) == 0; // "integer" without "number"
+    return switch (instance) {
+        .null => (mask & 1) != 0,
+        .bool => (mask & 2) != 0,
+        .integer => (mask & (4 | 8)) != 0, // matches "integer" or "number"
+        .float => |f| if ((mask & 8) != 0) true // "number" accepts all floats
+        else if (has_integer) @floor(f) == f and !std.math.isNan(f) and !std.math.isInf(f)
+        else false,
+        .string => (mask & 16) != 0,
+        .array => (mask & 32) != 0,
+        .object => (mask & 64) != 0,
+        .number_string => (mask & 8) != 0,
+    };
 }
 
 fn isValid_enum_check(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
@@ -806,8 +815,13 @@ fn jsonValueHashFast(val: std.json.Value) u64 {
         .float => |f| @bitCast(f),
         .string => |s| blk: {
             var h: u64 = 0xcbf29ce484222325 +% @as(u64, s.len);
-            const len = @min(s.len, 16); // hash first 16 bytes for speed
-            for (s[0..len]) |ch| h = (h ^ ch) *% 0x100000001b3;
+            if (s.len <= 32) {
+                for (s) |ch| h = (h ^ ch) *% 0x100000001b3;
+            } else {
+                // Hash first 16 + last 16 bytes for better collision resistance
+                for (s[0..16]) |ch| h = (h ^ ch) *% 0x100000001b3;
+                for (s[s.len - 16 ..]) |ch| h = (h ^ ch) *% 0x100000001b3;
+            }
             break :blk h;
         },
         .array => |a| @as(u64, @intFromPtr(a.items.ptr)) *% 0x9e3779b97f4a7c15,
@@ -1647,20 +1661,17 @@ fn linkSchema(node_map: *const CompiledSchema.NodeMap, value: std.json.Value) Li
                             break;
                         },
                         .type_multi => {
-                            const w: *const CompiledValidator.SimpleTypeSliceWrapper = v.getData(*const CompiledValidator.SimpleTypeSliceWrapper);
+                            // Extract pre-computed bitmask from inline data
+                            const stored_mask = @as(u8, @intCast(CompiledValidator.extractU64(v.data) & 0xFF));
                             mask = 0;
-                            for (w.items) |st| {
-                                mask |= typeMaskForString(switch (st) {
-                                    .null => "null",
-                                    .boolean => "boolean",
-                                    .integer => "integer",
-                                    .number => "number",
-                                    .string => "string",
-                                    .array => "array",
-                                    .object => "object",
-                                    .none => "",
-                                });
-                            }
+                            // Convert internal mask bits to typeMask bits
+                            if (stored_mask & 1 != 0) mask |= 1; // null
+                            if (stored_mask & 2 != 0) mask |= 2; // boolean
+                            if (stored_mask & 4 != 0) mask |= 4 | 8; // integer → matches int+number
+                            if (stored_mask & 8 != 0) mask |= 4 | 8; // number → matches int+number
+                            if (stored_mask & 16 != 0) mask |= 16; // string
+                            if (stored_mask & 32 != 0) mask |= 32; // array
+                            if (stored_mask & 64 != 0) mask |= 64; // object
                             break;
                         },
                         .object_fast => { mask = 64; break; },
@@ -3289,8 +3300,22 @@ fn compilePatternProperties(
     return null;
 }
 
+/// Convert a SimpleType to its bitmask representation.
+fn simpleTypeMask(st: SimpleType) u8 {
+    return switch (st) {
+        .null => 1,
+        .boolean => 2,
+        .integer => 4,
+        .number => 8,
+        .string => 16,
+        .array => 32,
+        .object => 64,
+        .none => 0xFF,
+    };
+}
+
 /// Compile a "type" keyword value into a CompiledValidator.
-fn compileType(alloc: Allocator, type_val: std.json.Value) ?CompiledValidator {
+fn compileType(_: Allocator, type_val: std.json.Value) ?CompiledValidator {
     switch (type_val) {
         .string => |s| {
             const st = detectSimpleTypeFromString(s);
@@ -3298,24 +3323,18 @@ fn compileType(alloc: Allocator, type_val: std.json.Value) ?CompiledValidator {
             return null;
         },
         .array => |arr| {
-            var types = std.ArrayList(SimpleType).init(alloc);
+            var mask: u8 = 0;
             for (arr.items) |item| {
                 switch (item) {
                     .string => |s| {
                         const st = detectSimpleTypeFromString(s);
-                        if (st != .none) {
-                            types.append(st) catch {};
-                        }
+                        if (st != .none) mask |= simpleTypeMask(st);
                     },
                     else => {},
                 }
             }
-            if (types.items.len > 0) {
-                const slice = types.toOwnedSlice() catch &.{};
-                if (alloc.create(CompiledValidator.SimpleTypeSliceWrapper)) |w| {
-                    w.* = .{ .items = slice };
-                    return CompiledValidator.initPtr(.type_multi, w, &isValid_type_multi);
-                } else |_| {}
+            if (mask != 0) {
+                return .{ .isValid_fn = &isValid_type_multi, .data = CompiledValidator.inlineU64(@as(u64, mask)), .tag = .type_multi };
             }
             return null;
         },

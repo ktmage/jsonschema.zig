@@ -16,17 +16,20 @@ pub fn validate(ctx: Context) void {
     // Pre-lookup compiled node once for the contains schema
     const contains_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |c| c.getNode(contains_schema) else null;
 
+    // Check for minContains / maxContains
+    const has_min_contains = schema_obj.get("minContains") != null;
+    const has_max_contains = schema_obj.get("maxContains") != null;
+    const need_full_count = has_min_contains or has_max_contains;
+
     // Count how many items match
     var match_count: usize = 0;
     for (arr.items) |item| {
         if (ctx.isSubschemaValidWithNode(contains_schema, item, contains_node)) {
             match_count += 1;
+            // Standard contains (no min/max): one match is enough
+            if (!need_full_count) break;
         }
     }
-
-    // Check for minContains / maxContains
-    const has_min_contains = schema_obj.get("minContains") != null;
-    const has_max_contains = schema_obj.get("maxContains") != null;
 
     if (has_min_contains or has_max_contains) {
         // When minContains or maxContains are present, they control the validation
