@@ -19,6 +19,8 @@ pub fn validate(ctx: Context) void {
     };
 
     if (instance_num > limit) {
-        ctx.addError("maximum", "Value must be less than or equal to maximum");
+        const msg = std.fmt.allocPrint(ctx.allocator, "{d} is greater than the maximum of {d}", .{ instance_num, limit }) catch return;
+        defer ctx.allocator.free(msg);
+        ctx.addError("maximum", msg);
     }
 }

@@ -113,6 +113,8 @@ for (instances) |instance| {
 
 The compiled path pre-links sub-schema references, eliminates hash-map lookups, and enables a zero-allocation `isValidFast` path for common schema patterns.
 
+> **Memory model**: `CompiledSchema` holds internal references to the original parsed `schema` JSON value. The parsed schema **must outlive** the `CompiledSchema` — do not call `schema.deinit()` before `compiled.deinit()`. The `CompiledSchema` owns an internal arena allocator that is freed on `deinit()`.
+
 ## Installation
 
 Add to your `build.zig.zon`:
@@ -168,6 +170,8 @@ const result = jsonschema.validateWithRegistry(
     &registry,
 );
 ```
+
+> **Remote schemas**: The library does not automatically fetch remote `$ref` URIs. Fetch schemas yourself (e.g., via `std.http.Client`) and register them with `registry.put()` before validation.
 
 ## Error Details
 

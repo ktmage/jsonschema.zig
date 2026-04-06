@@ -19,6 +19,8 @@ pub fn validate(ctx: Context) void {
     };
 
     if (instance_num <= limit) {
-        ctx.addError("exclusiveMinimum", "Value must be strictly greater than exclusiveMinimum");
+        const msg = std.fmt.allocPrint(ctx.allocator, "{d} is less than or equal to the exclusive minimum of {d}", .{ instance_num, limit }) catch return;
+        defer ctx.allocator.free(msg);
+        ctx.addError("exclusiveMinimum", msg);
     }
 }

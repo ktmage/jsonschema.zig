@@ -18,6 +18,8 @@ pub fn validate(ctx: Context) void {
     };
 
     if (arr.items.len > max_items) {
-        ctx.addError("maxItems", "Array has more items than maxItems");
+        const msg = std.fmt.allocPrint(ctx.allocator, "Array has {d} items, maximum is {d}", .{ arr.items.len, max_items }) catch return;
+        defer ctx.allocator.free(msg);
+        ctx.addError("maxItems", msg);
     }
 }

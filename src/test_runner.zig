@@ -225,8 +225,8 @@ test "JSON Schema Test Suite — Draft 2020-12" {
     while (try iter.next()) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
 
-        // Skip format.json — we don't validate format by default
-        if (std.mem.eql(u8, entry.name, "format.json")) continue;
+        // format.json tests annotation-only behavior (format validation disabled by default)
+        // These tests pass because our validator ignores format when validate_formats=false
 
         const contents = dir.readFileAlloc(allocator, entry.name, 10 * 1024 * 1024) catch |err| {
             std.debug.print("Failed to read {s}: {}\n", .{ entry.name, err });

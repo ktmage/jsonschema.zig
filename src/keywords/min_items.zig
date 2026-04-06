@@ -18,6 +18,8 @@ pub fn validate(ctx: Context) void {
     };
 
     if (arr.items.len < min_items) {
-        ctx.addError("minItems", "Array has fewer items than minItems");
+        const msg = std.fmt.allocPrint(ctx.allocator, "Array has {d} items, minimum is {d}", .{ arr.items.len, min_items }) catch return;
+        defer ctx.allocator.free(msg);
+        ctx.addError("minItems", msg);
     }
 }

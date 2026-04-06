@@ -19,6 +19,8 @@ pub fn validate(ctx: Context) void {
     };
 
     if (obj.count() < limit) {
-        ctx.addError("minProperties", "Object has too few properties");
+        const msg = std.fmt.allocPrint(ctx.allocator, "Object has {d} properties, minimum is {d}", .{ obj.count(), limit }) catch return;
+        defer ctx.allocator.free(msg);
+        ctx.addError("minProperties", msg);
     }
 }

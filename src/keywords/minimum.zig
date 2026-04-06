@@ -19,6 +19,8 @@ pub fn validate(ctx: Context) void {
     };
 
     if (instance_num < limit) {
-        ctx.addError("minimum", "Value must be greater than or equal to minimum");
+        const msg = std.fmt.allocPrint(ctx.allocator, "{d} is less than the minimum of {d}", .{ instance_num, limit }) catch return;
+        defer ctx.allocator.free(msg);
+        ctx.addError("minimum", msg);
     }
 }
