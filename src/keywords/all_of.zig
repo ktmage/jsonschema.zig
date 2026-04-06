@@ -10,6 +10,7 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
+    var base_path: ?[]const u8 = null;
     for (sub_schemas, 0..) |sub_schema, i| {
         // Fast path: skip path allocation for valid sub-schemas
         if (ctx.compiled != null and ctx.isSubschemaValid(sub_schema, ctx.instance)) {
@@ -17,8 +18,12 @@ pub fn validate(ctx: Context) void {
         }
 
         // Failed — build paths and collect errors
-        const base_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "allOf");
-        const path = JsonPointer.appendIndex(ctx.allocator, base_path, i);
+        const bp = base_path orelse blk: {
+            const p = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "allOf");
+            base_path = p;
+            break :blk p;
+        };
+        const path = JsonPointer.appendIndex(ctx.allocator, bp, i);
         const result = ctx.validateSubschema(sub_schema, ctx.instance, ctx.instance_path, path);
         defer result.deinit();
         if (!result.isValid()) {

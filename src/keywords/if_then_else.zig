@@ -11,6 +11,8 @@ pub fn validate(ctx: Context) void {
     if (ctx.isSubschemaValid(if_schema, ctx.instance)) {
         // "if" passed — validate against "then" if it exists
         const then_schema = schema_obj.get("then") orelse return;
+        // Fast path: skip path allocation if then-schema passes
+        if (ctx.compiled != null and ctx.isSubschemaValid(then_schema, ctx.instance)) return;
         const then_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "then");
         const then_result = ctx.validateSubschema(then_schema, ctx.instance, ctx.instance_path, then_path);
         defer then_result.deinit();
@@ -27,6 +29,8 @@ pub fn validate(ctx: Context) void {
     } else {
         // "if" failed — validate against "else" if it exists
         const else_schema = schema_obj.get("else") orelse return;
+        // Fast path: skip path allocation if else-schema passes
+        if (ctx.compiled != null and ctx.isSubschemaValid(else_schema, ctx.instance)) return;
         const else_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "else");
         const else_result = ctx.validateSubschema(else_schema, ctx.instance, ctx.instance_path, else_path);
         defer else_result.deinit();

@@ -16,6 +16,7 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
+    var base_schema_path: ?[]const u8 = null;
     var it = properties_schema.iterator();
     while (it.next()) |entry| {
         const prop_name = entry.key_ptr.*;
@@ -44,9 +45,13 @@ pub fn validate(ctx: Context) void {
         }
 
         // Slow path: build paths and collect errors
-        const base_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "properties");
+        const bp = base_schema_path orelse blk: {
+            const p = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "properties");
+            base_schema_path = p;
+            break :blk p;
+        };
         const prop_instance_path = JsonPointer.appendProperty(ctx.allocator, ctx.instance_path, prop_name);
-        const prop_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, prop_name);
+        const prop_schema_path = JsonPointer.appendProperty(ctx.allocator, bp, prop_name);
 
         const result = ctx.validateSubschema(prop_schema, instance_value, prop_instance_path, prop_schema_path);
         defer result.deinit();

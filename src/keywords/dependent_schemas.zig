@@ -16,7 +16,7 @@ pub fn validate(ctx: Context) void {
         else => return,
     };
 
-    const base_schema_path = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "dependentSchemas");
+    var base_schema_path: ?[]const u8 = null;
 
     var it = deps.iterator();
     while (it.next()) |entry| {
@@ -31,7 +31,12 @@ pub fn validate(ctx: Context) void {
             continue;
         }
 
-        const dep_schema_path = JsonPointer.appendProperty(ctx.allocator, base_schema_path, prop_name);
+        const bp = base_schema_path orelse blk: {
+            const p = JsonPointer.appendProperty(ctx.allocator, ctx.schema_path, "dependentSchemas");
+            base_schema_path = p;
+            break :blk p;
+        };
+        const dep_schema_path = JsonPointer.appendProperty(ctx.allocator, bp, prop_name);
 
         // Schema form: the whole instance must match the schema
         const result = ctx.validateSubschema(dep_schema, ctx.instance, ctx.instance_path, dep_schema_path);
