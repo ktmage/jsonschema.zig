@@ -70,6 +70,8 @@ pub const Context = struct {
     bool_only: bool = false,
     /// When true, the "format" keyword is validated (not just annotated).
     validate_formats: bool = false,
+    /// Custom keyword validators registered by the user.
+    custom_keywords: ?[]const CustomKeyword = null,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -385,6 +387,14 @@ pub const Context = struct {
 
 /// Keyword validator function signature.
 pub const KeywordValidator = *const fn (ctx: Context) void;
+
+/// A user-defined custom keyword extension.
+pub const CustomKeyword = struct {
+    /// The keyword name (e.g., "x-my-keyword").
+    name: []const u8,
+    /// The validation function.
+    validate: KeywordValidator,
+};
 
 /// Registry of keyword validators.
 /// Each keyword maps to a validation function.
@@ -1694,6 +1704,15 @@ pub fn validateAll(ctx: Context) void {
                 }
             } else {
                 validator_fn(ctx);
+            }
+        }
+    }
+
+    // Run custom keyword validators
+    if (ctx.custom_keywords) |custom| {
+        for (custom) |kw| {
+            if (schema_obj.get(kw.name) != null) {
+                kw.validate(ctx);
             }
         }
     }

@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 
 pub const JsonPointer = @import("json_pointer.zig");
 pub const Validator = @import("validator.zig");
+pub const CustomKeyword = Validator.CustomKeyword;
 pub const SchemaRegistry = @import("schema_registry.zig").SchemaRegistry;
 const schema_registry_mod = @import("schema_registry.zig");
 pub const compiled_mod = @import("compiled.zig");
