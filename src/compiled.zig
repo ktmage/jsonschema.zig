@@ -554,8 +554,6 @@ pub const CompiledNode = struct {
     needs_uri_resolution: bool = false,
     /// True if this schema has $id (scope change).
     has_id: bool = false,
-    /// True if this schema has unevaluatedProperties keyword.
-    has_unevaluated_properties: bool = false,
     /// Pre-computed ceiling of property names that could be evaluated by any
     /// applicator branch. Non-null only when the schema has unevaluatedProperties.
     unevaluated_ceiling: ?[]const []const u8 = null,
@@ -1888,7 +1886,6 @@ fn compileNode(
                 .always_valid = effective_always_valid,
                 .needs_uri_resolution = has_ref or obj.get("$id") != null,
                 .has_id = obj.get("$id") != null,
-                .has_unevaluated_properties = obj.get("unevaluatedProperties") != null,
                 .unevaluated_ceiling = unevaluated_ceiling,
                 .unevaluated_ceiling_map = ceiling_map,
                 .unevaluated_all_covered = unevaluated_all_covered,
