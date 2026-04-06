@@ -85,8 +85,9 @@ fn isLeapYear(year: u16) bool {
 }
 
 fn isTime(s: []const u8) bool {
-    // hh:mm:ss[.frac](Z|+hh:mm|-hh:mm)
-    if (s.len < 8) return false; // minimum: 00:00:00 (without offset, but we need offset)
+    // RFC 3339 time: hh:mm:ss[.frac](Z|+hh:mm|-hh:mm)
+    // Minimum valid: "00:00:00Z" = 9 chars (timezone offset is required)
+    if (s.len < 9) return false;
     if (s[2] != ':' or s[5] != ':') return false;
     const hour = std.fmt.parseInt(u8, s[0..2], 10) catch return false;
     const minute = std.fmt.parseInt(u8, s[3..5], 10) catch return false;
@@ -230,12 +231,19 @@ fn isUri(s: []const u8) bool {
 }
 
 fn isUriReference(s: []const u8) bool {
-    // URI-reference = URI / relative-ref
+    // URI-reference = URI / relative-ref (RFC 3986 Section 4.1)
     if (s.len == 0) return true; // empty string is valid relative-ref
-    // Check if it's a URI (has scheme)
     if (isUri(s)) return true;
-    // Otherwise it's a relative-ref: starts with //, /, path, or query/fragment
-    return true; // Simplified: accept any string as relative-ref
+    // Relative-ref: must not contain invalid characters
+    // Reject characters not allowed in URI-references per RFC 3986
+    for (s) |ch| {
+        if (ch < 0x21 or ch == 0x7F) return false; // control chars and space
+        // Allow: unreserved / pct-encoded / sub-delims / : / @ / / / ?/ # / [ / ]
+        // Reject: < > { } | \ ^ ` (delimiters not in RFC 3986 URI-reference)
+        if (ch == '<' or ch == '>' or ch == '{' or ch == '}' or
+            ch == '|' or ch == '\\' or ch == '^' or ch == '`') return false;
+    }
+    return true;
 }
 
 fn isUriTemplate(s: []const u8) bool {
@@ -280,28 +288,23 @@ fn isRelativeJsonPointer(s: []const u8) bool {
 }
 
 fn isRegex(s: []const u8) bool {
-    // Check if s is a valid ECMA-262 regex
-    // Simplified: check for balanced grouping
-    var depth: i32 = 0;
-    var i: usize = 0;
-    var in_class = false;
-    while (i < s.len) {
-        if (s[i] == '\\') {
-            i += 2; // skip escaped char
-            continue;
-        }
-        if (s[i] == '[' and !in_class) {
-            in_class = true;
-        } else if (s[i] == ']' and in_class) {
-            in_class = false;
-        } else if (!in_class) {
-            if (s[i] == '(') depth += 1;
-            if (s[i] == ')') depth -= 1;
-            if (depth < 0) return false;
-        }
-        i += 1;
+    // Check if s is a valid ECMA-262 regex by attempting POSIX ERE compilation.
+    // Convert ECMA shortcuts first, then try to compile.
+    const c = @import("../compiled.zig").c;
+    const compiled_mod = @import("../compiled.zig");
+    // Use a stack allocator for the conversion
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const posix_pat = compiled_mod.convertEcmaToPostfix(fba.allocator(), s) catch s;
+    const pat_z = fba.allocator().dupeZ(u8, posix_pat) catch return true; // can't check, assume valid
+    const regex: *c.regex_t = @ptrCast(@alignCast(std.c.malloc(256) orelse return true));
+    defer std.c.free(@ptrCast(regex));
+    const result = c.regcomp(regex, pat_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+    if (result == 0) {
+        c.regfree(regex);
+        return true;
     }
-    return depth == 0;
+    return false;
 }
 
 fn isUuid(s: []const u8) bool {

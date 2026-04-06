@@ -349,14 +349,23 @@ fn makeSingleError(
     keyword: []const u8,
     message: []const u8,
 ) ValidationResult {
-    const err = ValidationError{
-        .instance_path = allocator.dupe(u8, instance_path) catch "",
-        .schema_path = allocator.dupe(u8, schema_path) catch "",
-        .keyword = keyword,
-        .message = allocator.dupe(u8, message) catch "",
-    };
     const errors = allocator.alloc(ValidationError, 1) catch return .{ .errors = &.{}, .allocator = allocator };
-    errors[0] = err;
+    const ip = allocator.dupe(u8, instance_path) catch {
+        allocator.free(errors);
+        return .{ .errors = &.{}, .allocator = allocator };
+    };
+    const sp = allocator.dupe(u8, schema_path) catch {
+        allocator.free(ip);
+        allocator.free(errors);
+        return .{ .errors = &.{}, .allocator = allocator };
+    };
+    const msg = allocator.dupe(u8, message) catch {
+        allocator.free(sp);
+        allocator.free(ip);
+        allocator.free(errors);
+        return .{ .errors = &.{}, .allocator = allocator };
+    };
+    errors[0] = .{ .instance_path = ip, .schema_path = sp, .keyword = keyword, .message = msg };
     return .{ .errors = errors, .allocator = allocator };
 }
 

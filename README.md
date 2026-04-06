@@ -114,6 +114,8 @@ for (instances) |instance| {
 The compiled path pre-links sub-schema references, eliminates hash-map lookups, and enables a zero-allocation `isValidFast` path for common schema patterns.
 
 > **Memory model**: `CompiledSchema` holds internal references to the original parsed `schema` JSON value. The parsed schema **must outlive** the `CompiledSchema` — do not call `schema.deinit()` before `compiled.deinit()`. The `CompiledSchema` owns an internal arena allocator that is freed on `deinit()`.
+>
+> **Thread safety**: A `CompiledSchema` is read-only after compilation and can be shared across threads for concurrent validation. Each validation call must use its own allocator and `ValidationResult`. The original schema JSON must not be modified or freed while any thread is validating.
 
 ## Installation
 
@@ -203,7 +205,7 @@ This project follows [Semantic Versioning](https://semver.org/):
 - **Minor** (0.1.0 → 0.2.0): New features, backward compatible
 - **Patch** (0.1.0 → 0.1.1): Bug fixes only
 
-The library is currently pre-1.0. The public API (`validate`, `validateCompiled`, `isValidCompiled`, `CompiledSchema`, `SchemaRegistry`, `ValidationResult`) may change between minor versions. A 1.0.0 release will signal API stability.
+The library is currently pre-1.0. The public API (`validate`, `validateCompiled`, `validateWithRegistry`, `validateCompiledWithRegistry`, `isValidCompiled`, `CompiledSchema`, `SchemaRegistry`, `ValidationResult`, `CustomKeyword`) may change between minor versions. A 1.0.0 release will signal API stability.
 
 ## Contributing
 
