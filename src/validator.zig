@@ -400,8 +400,13 @@ pub const KeywordValidator = *const fn (ctx: Context) void;
 pub const CustomKeyword = struct {
     /// The keyword name (e.g., "x-my-keyword").
     name: []const u8,
-    /// The validation function.
-    validate: KeywordValidator,
+    /// The validation function (opaque fn pointer to break dependency loop).
+    validate: *const anyopaque,
+
+    pub fn call(self: CustomKeyword, ctx: Context) void {
+        const func: KeywordValidator = @ptrCast(@alignCast(self.validate));
+        func(ctx);
+    }
 };
 
 /// Registry of keyword validators.
@@ -1728,7 +1733,7 @@ pub fn validateAll(ctx: Context) void {
     if (ctx.custom_keywords) |custom| {
         for (custom) |kw| {
             if (schema_obj.get(kw.name) != null) {
-                kw.validate(ctx);
+                kw.call(ctx);
             }
         }
     }
