@@ -20,25 +20,25 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 | package-json | **41 ms** | — | — | — | 3,163 ms |
 | cspell | **76 ms** | — | — | 244 ms | 5,468 ms |
 
-**Cold mode** — schema compilation + single validation pass per instance (550 compile+validate cycles):
+**Cold mode** — per-instance median of schema compilation + single validation (550 cycles, Docker-isolated):
 
-| Dataset | jsonschema.zig | jsonschema (Rust) | jsonschema (Go) | Ajv (JS) | jsonschema (Python) |
+| Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
 |---------|----:|-----:|---:|----:|-------:|
-| helm-chart-lock | **10 ms** | 14 ms | 95 ms | 222 ms | 25 ms |
-| dependabot | **22 ms** | 54 ms | 263 ms | 582 ms | 28 ms |
-| geojson | **96 ms** | 326 ms | 1,599 ms | 7,726 ms | 294 ms |
-| openapi | **177 ms** | 12,262 ms | 1,886 ms | 4,176 ms | 3,381 ms |
-| tsconfig | **183 ms** | 2,196 ms | 2,014 ms | — | 50 ms |
-| github-workflow | **127 ms** | 568 ms | 1,834 ms | 7,604 ms | 225 ms |
-| package-json | **113 ms** | 201 ms | 1,130 ms | — | 36 ms |
-| cspell | **123 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
+| helm-chart-lock | **14 us** | 14 us | 156 us | 302 us | 46 us |
+| dependabot | **35 us** | 84 us | 379 us | 885 us | 53 us |
+| geojson | **181 us** | 545 us | 2,796 us | 13,796 us | 379 us |
+| openapi | **399 us** | 22,841 us | 2,940 us | 7,225 us | 5,511 us |
+| tsconfig | **678 us** | 3,909 us | 3,376 us | — | 87 us |
+| github-workflow | **293 us** | 947 us | 3,261 us | 13,269 us | 384 us |
+| package-json | 422 us | **335 us** | 1,898 us | — | 65 us |
+| cspell | **271 us** | 432 us | 2,652 us | 8,530 us | 105 us |
 
 <details>
 <summary id="benchmark-details">Benchmark details</summary>
 
 - **Machine**: Apple M4 Pro (12 cores, 48GB RAM), macOS 15.5
 - **Isolation**: Docker containers per language
-- **Method**: Median of 5 runs, 100 warm iterations, boolean-only validation (`is_valid`), format validation disabled
+- **Method**: Warm: median of 5 runs, 100 iterations; Cold: per-instance median of 550 compile+validate cycles; boolean-only validation (`is_valid`), format validation disabled
 - **Schemas**: Real-world schemas from [SchemaStore](https://www.schemastore.org/), [OpenAPI Initiative](https://www.openapis.org/), [GeoJSON](https://geojson.org/)
 - **Instances**: Synthetically generated (500 valid + 50 invalid per dataset, deterministic seed)
 - **"—"** = the library failed to compile or validate the schema
