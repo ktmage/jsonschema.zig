@@ -6,6 +6,20 @@ const SchemaRegistry = jsonschema.SchemaRegistry;
 pub const c = @cImport(@cInclude("regex.h"));
 const FastRegex = @import("fast_regex.zig").FastRegex;
 
+/// Allocate a regex_t using C malloc (required on Linux where regex_t is opaque).
+/// We allocate a generous 256 bytes which covers all known regex_t implementations.
+const REGEX_T_SIZE = 256;
+
+fn cMallocRegex() ?*c.regex_t {
+    const ptr = std.c.malloc(REGEX_T_SIZE);
+    if (ptr) |p| return @ptrCast(@alignCast(p));
+    return null;
+}
+
+fn cFreeRegex(ptr: *c.regex_t) void {
+    std.c.free(@ptrCast(ptr));
+}
+
 /// A pre-compiled schema that accelerates repeated validation.
 ///
 /// Instead of scanning 30+ keyword hashmap lookups per schema node on every
@@ -388,18 +402,19 @@ pub const CompiledRegex = struct {
         if (self.fast) |*fast| return fast.matches(str);
         // POSIX fallback: compile regex on-demand from stored pattern string
         if (self.pattern_z) |pat_z| {
-            var regex: c.regex_t = undefined;
-            if (c.regcomp(&regex, pat_z, c.REG_EXTENDED | c.REG_NOSUB) != 0) return false;
-            defer c.regfree(&regex);
+            const regex = cMallocRegex() orelse return false;
+            defer cFreeRegex(regex);
+            if (c.regcomp(regex, pat_z, c.REG_EXTENDED | c.REG_NOSUB) != 0) return false;
+            defer c.regfree(regex);
             if (str.len < 512) {
                 var buf: [512]u8 = undefined;
                 @memcpy(buf[0..str.len], str);
                 buf[str.len] = 0;
-                return c.regexec(&regex, &buf, 0, null, 0) == 0;
+                return c.regexec(regex, &buf, 0, null, 0) == 0;
             }
             if (allocator) |alloc| {
                 const str_z = alloc.dupeZ(u8, str) catch return false;
-                return c.regexec(&regex, str_z.ptr, 0, null, 0) == 0;
+                return c.regexec(regex, str_z.ptr, 0, null, 0) == 0;
             }
         }
         return false;
@@ -1260,14 +1275,15 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
     if (!cr.valid) return null; // regex compile failed, can't validate in fast path
     // POSIX fallback: compile on-demand
     if (cr.pattern_z) |pat_z| {
-        var regex: c.regex_t = undefined;
-        if (c.regcomp(&regex, pat_z, c.REG_EXTENDED | c.REG_NOSUB) != 0) return null;
-        defer c.regfree(&regex);
+        const regex = cMallocRegex() orelse return null;
+        defer cFreeRegex(regex);
+        if (c.regcomp(regex, pat_z, c.REG_EXTENDED | c.REG_NOSUB) != 0) return null;
+        defer c.regfree(regex);
         if (instance_str.len < 512) {
             var buf: [512]u8 = undefined;
             @memcpy(buf[0..instance_str.len], instance_str);
             buf[instance_str.len] = 0;
-            return c.regexec(&regex, &buf, 0, null, 0) == 0;
+            return c.regexec(regex, &buf, 0, null, 0) == 0;
         }
     }
     return null;
@@ -2934,10 +2950,15 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     // Store null-terminated pattern for on-demand POSIX regex compilation
     cr.pattern_z = pattern_z.ptr;
     // Test-compile to check validity (don't store the regex_t)
-    var test_regex: c.regex_t = undefined;
-    const comp_result = c.regcomp(&test_regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-    cr.valid = comp_result == 0;
-    if (cr.valid) c.regfree(&test_regex);
+    const test_regex = cMallocRegex();
+    if (test_regex) |tr| {
+        const comp_result = c.regcomp(tr, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+        cr.valid = comp_result == 0;
+        if (cr.valid) c.regfree(tr);
+        cFreeRegex(tr);
+    } else {
+        cr.valid = false;
+    }
     cr.fast = FastRegex.compile(pattern_str, alloc);
     regex_list.append(cr) catch {};
     return cr;
@@ -3355,10 +3376,15 @@ fn compilePatternProperties(
                 cr.ci_literal = ci;
             }
         }
-        var test_regex2: c.regex_t = undefined;
-        const comp_result = c.regcomp(&test_regex2, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-        cr.valid = comp_result == 0;
-        if (cr.valid) c.regfree(&test_regex2);
+        const test_regex2 = cMallocRegex();
+        if (test_regex2) |tr2| {
+            const comp_result = c.regcomp(tr2, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+            cr.valid = comp_result == 0;
+            if (cr.valid) c.regfree(tr2);
+            cFreeRegex(tr2);
+        } else {
+            cr.valid = false;
+        }
         cr.fast = FastRegex.compile(pattern, alloc);
         regex_list.append(cr) catch {};
         entries.append(.{
@@ -3620,10 +3646,15 @@ fn collectStaticCeiling(
                         cr.literal_set = lset;
                     }
                 }
-                var test_regex3: c.regex_t = undefined;
-                const comp_result = c.regcomp(&test_regex3, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-                cr.valid = comp_result == 0;
-                if (cr.valid) c.regfree(&test_regex3);
+                const test_regex3 = cMallocRegex();
+                if (test_regex3) |tr3| {
+                    const comp_result = c.regcomp(tr3, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+                    cr.valid = comp_result == 0;
+                    if (cr.valid) c.regfree(tr3);
+                    cFreeRegex(tr3);
+                } else {
+                    cr.valid = false;
+                }
                 cr.fast = FastRegex.compile(pattern, alloc);
                 regex_list.append(cr) catch {};
                 if (cr.valid or cr.simple_prefix != null or cr.is_identifier or cr.char_class != null or cr.literal_set != null) {

@@ -22,15 +22,17 @@ pub fn validate(ctx: Context) void {
     const instance_z = ctx.allocator.dupeZ(u8, instance_str) catch return;
     defer ctx.allocator.free(instance_z);
 
-    var regex: c.regex_t = undefined;
-    const comp_result = c.regcomp(&regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+    // Heap-allocate regex_t via C malloc (Linux/glibc: regex_t is opaque)
+    const regex: *c.regex_t = @ptrCast(@alignCast(std.c.malloc(256) orelse return));
+    defer std.c.free(@ptrCast(regex));
+    const comp_result = c.regcomp(regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
     if (comp_result != 0) {
         ctx.addError("pattern", "Failed to compile regex pattern");
         return;
     }
-    defer c.regfree(&regex);
+    defer c.regfree(regex);
 
-    const exec_result = c.regexec(&regex, instance_z.ptr, 0, null, 0);
+    const exec_result = c.regexec(regex, instance_z.ptr, 0, null, 0);
     if (exec_result != 0) {
         const msg = std.fmt.allocPrint(
             ctx.allocator,
