@@ -260,7 +260,7 @@ pub const Context = struct {
                     const node = compiled.getNode(sub_schema);
                     if (node) |n| {
                         if (!n.has_id or self.registry == null) {
-                            if (n.isValidFast(instance, compiled)) |result| return result;
+                            if (n.isValidFast(instance, compiled, self.allocator)) |result| return result;
                             // isValid returned null — zero-allocation Context fallback
                             if (self.registry == null) {
                                 var error_buf: [1]jsonschema.ValidationError = undefined;
@@ -320,7 +320,7 @@ pub const Context = struct {
                     const node = pre_node orelse compiled.getNode(sub_schema);
                     if (node) |n| {
                         if (!n.has_id or self.registry == null) {
-                            if (n.isValidFast(instance, compiled)) |result| return result;
+                            if (n.isValidFast(instance, compiled, self.allocator)) |result| return result;
                             if (self.registry == null) {
                                 // Zero-allocation fallback: stack-based error sentinel
                                 var error_buf: [1]jsonschema.ValidationError = undefined;
@@ -553,7 +553,7 @@ pub fn validateAll(ctx: Context) void {
                                 const can_skip = !rnode.needs_uri_resolution and !rnode.has_id;
                                 if (can_skip) {
                                     if (rnode.always_valid) return;
-                                    if (rnode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (rnode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                         if (result) return;
                                         if (ctx.bool_only) {
                                             ctx.addError("$ref", "");
@@ -853,7 +853,7 @@ pub fn validateAll(ctx: Context) void {
                                 const inst_val = inst_obj.get(entry.name) orelse continue;
                                 if (entry.schema.node) |enode| {
                                     if (!enode.needs_uri_resolution) {
-                                        if (enode.isValidFast(inst_val, compiled)) |result| {
+                                        if (enode.isValidFast(inst_val, compiled, ctx.allocator)) |result| {
                                             if (result) continue;
                                         }
                                     }
@@ -885,7 +885,7 @@ pub fn validateAll(ctx: Context) void {
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip) {
                                     // Try isValid (handles ref_overrides, more cases than isValidFast)
-                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (snode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                         if (result) continue;
                                         any_failed = true;
                                         break;
@@ -928,7 +928,7 @@ pub fn validateAll(ctx: Context) void {
                                         if (std.mem.eql(u8, dv, entry.value)) {
                                             if (entry.schema.node) |snode| {
                                                 if (!snode.needs_uri_resolution) {
-                                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                                    if (snode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                                         if (result) {
                                                             matched = true;
                                                             break;
@@ -963,7 +963,7 @@ pub fn validateAll(ctx: Context) void {
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip_o) {
                                     // Use isValid (handles ref_overrides without Context)
-                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (snode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                         if (result) {
                                             match_count += 1;
                                             if (match_count > 1) break;
@@ -1009,7 +1009,7 @@ pub fn validateAll(ctx: Context) void {
                                 const can_skip = !snode.needs_uri_resolution or
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip) {
-                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (snode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                         if (result) {
                                             found = true;
                                             break;
@@ -1032,7 +1032,7 @@ pub fn validateAll(ctx: Context) void {
                         const ls: *const compiled_mod.LinkedSchema = v.getData(*const compiled_mod.LinkedSchema);
                         if (ls.node) |snode| {
                             if (!snode.needs_uri_resolution) {
-                                if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                if (snode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                     if (result) {
                                         ctx.addError("not", "Instance must not validate against the schema");
                                     }
@@ -1068,7 +1068,7 @@ pub fn validateAll(ctx: Context) void {
                                 } else {
                                     var all_fast = true;
                                     for (arr.items[ic.prefix_count..]) |item| {
-                                        if (inode.isValidFast(item, compiled)) |result| {
+                                        if (inode.isValidFast(item, compiled, ctx.allocator)) |result| {
                                             if (result) continue;
                                         }
                                         all_fast = false;
@@ -1125,14 +1125,14 @@ pub fn validateAll(ctx: Context) void {
                                         }
                                         // Inline 1-validator patterns to skip isValidFast call
                                         if (enode.ref_overrides and enode.validators.len == 1) {
-                                            if (compiled_mod.isValidatorValid(enode.validators[0], val, compiled)) |result| {
+                                            if (compiled_mod.isValidatorValid(enode.validators[0], val, compiled, ctx.allocator)) |result| {
                                                 if (result) continue;
                                             }
                                             need_slow = true;
                                             break;
                                         }
                                         if (!enode.has_id or ctx.registry == null) {
-                                            if (enode.isValidFast(val, compiled)) |result| {
+                                            if (enode.isValidFast(val, compiled, ctx.allocator)) |result| {
                                                 if (result) continue;
                                             }
                                         }
@@ -1252,7 +1252,7 @@ pub fn validateAll(ctx: Context) void {
                                 (!rnode.has_id and ctx.registry == null);
                             if (can_skip) {
                                 if (rnode.always_valid) continue;
-                                if (rnode.isValidFast(ctx.instance, compiled)) |result| {
+                                if (rnode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                     if (result) continue;
                                     // isValidFast returned false
                                     if (ctx.bool_only) {
@@ -1352,7 +1352,7 @@ pub fn validateAll(ctx: Context) void {
                                 // Fast path: try isValidFast on the additional property
                                 if (ap.schema.node) |anode| {
                                     if (!anode.needs_uri_resolution) {
-                                        if (anode.isValidFast(prop_value, compiled)) |result| {
+                                        if (anode.isValidFast(prop_value, compiled, ctx.allocator)) |result| {
                                             if (result) continue;
                                         }
                                     }
@@ -1372,7 +1372,7 @@ pub fn validateAll(ctx: Context) void {
                         const if_valid = blk: {
                             if (ite.if_schema.node) |inode| {
                                 if (!inode.needs_uri_resolution) {
-                                    if (inode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (inode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                         break :blk result;
                                     }
                                 }
@@ -1384,7 +1384,7 @@ pub fn validateAll(ctx: Context) void {
                                 // Fast path for then
                                 if (ts.node) |tnode| {
                                     if (!tnode.needs_uri_resolution) {
-                                        if (tnode.isValidFast(ctx.instance, compiled)) |result| {
+                                        if (tnode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                             if (result) continue;
                                         }
                                     }
@@ -1400,7 +1400,7 @@ pub fn validateAll(ctx: Context) void {
                                 // Fast path for else
                                 if (es.node) |enode| {
                                     if (!enode.needs_uri_resolution) {
-                                        if (enode.isValidFast(ctx.instance, compiled)) |result| {
+                                        if (enode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                             if (result) continue;
                                         }
                                     }
@@ -1464,7 +1464,7 @@ pub fn validateAll(ctx: Context) void {
                                 const can_skip_c = !cnode.needs_uri_resolution or
                                     (!cnode.has_id and ctx.registry == null);
                                 if (can_skip_c) {
-                                    if (cnode.isValidFast(item, compiled)) |result| {
+                                    if (cnode.isValidFast(item, compiled, ctx.allocator)) |result| {
                                         if (result) {
                                             match_count += 1;
                                             continue;
@@ -1500,7 +1500,7 @@ pub fn validateAll(ctx: Context) void {
                                 const can_skip_p = !pnode.needs_uri_resolution or
                                     (!pnode.has_id and ctx.registry == null);
                                 if (can_skip_p) {
-                                    if (pnode.isValidFast(pi_arr.items[i], compiled)) |result| {
+                                    if (pnode.isValidFast(pi_arr.items[i], compiled, ctx.allocator)) |result| {
                                         if (result) continue;
                                     }
                                 }
@@ -1536,7 +1536,7 @@ pub fn validateAll(ctx: Context) void {
                                 const can_skip = !snode.needs_uri_resolution or
                                     (!snode.has_id and ctx.registry == null);
                                 if (can_skip) {
-                                    if (snode.isValidFast(ctx.instance, compiled)) |result| {
+                                    if (snode.isValidFast(ctx.instance, compiled, ctx.allocator)) |result| {
                                         if (result) continue;
                                     }
                                 }
@@ -1577,7 +1577,7 @@ pub fn validateAll(ctx: Context) void {
                                 const pn_keys = pn_obj.keys();
                                 for (pn_keys) |key| {
                                     const name_val = std.json.Value{ .string = key };
-                                    if (pnode.isValidFast(name_val, compiled)) |result| {
+                                    if (pnode.isValidFast(name_val, compiled, ctx.allocator)) |result| {
                                         if (result) continue;
                                     }
                                     all_ok = false;
@@ -1655,7 +1655,7 @@ pub fn validateAll(ctx: Context) void {
                                     // Fast path
                                     if (pp_entry.schema.node) |pnode| {
                                         if (!pnode.needs_uri_resolution) {
-                                            if (pnode.isValidFast(prop_value, compiled)) |result| {
+                                            if (pnode.isValidFast(prop_value, compiled, ctx.allocator)) |result| {
                                                 if (result) continue;
                                             }
                                         }

@@ -61,7 +61,7 @@ pub fn isValidCompiled(
         if (n.always_valid) return true;
         // No registry in isValidCompiled, so $id doesn't affect resolution.
         // Safe to use isValidFast even with has_id.
-        if (n.isValidFast(instance, compiled)) |result| return result;
+        if (n.isValidFast(instance, compiled, allocator)) |result| return result;
     }
 
     // Fallback: bool_only validateCompiled — zero-allocation path

@@ -33,7 +33,7 @@ pub fn validate(ctx: Context) void {
         if (ctx.compiled) |c| {
             const looked_up_node = c.getNode(prop_schema);
             if (looked_up_node) |node| {
-                if (node.isValidFast(instance_value, c)) |fast_result| {
+                if (node.isValidFast(instance_value, c, ctx.allocator)) |fast_result| {
                     if (fast_result) continue;
                     // Invalid — fall through to slow path for error details
                 } else {

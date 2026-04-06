@@ -204,7 +204,7 @@ pub const PropertyEntry = struct {
 /// Each variant's validation logic is a standalone function called via isValid_fn,
 /// reducing per-dispatch overhead from ~5ns (switch) to ~3ns (indirect call).
 pub const CompiledValidator = struct {
-    isValid_fn: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool,
+    isValid_fn: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema, std.mem.Allocator) ?bool,
     data: *allowzero const anyopaque,
     tag: Tag,
 
@@ -344,15 +344,15 @@ pub const CompiledValidator = struct {
 
     // --- Constructor helpers ---
 
-    pub fn initInlineF64(comptime tag_val: Tag, val: f64, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool) CompiledValidator {
+    pub fn initInlineF64(comptime tag_val: Tag, val: f64, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema, std.mem.Allocator) ?bool) CompiledValidator {
         return .{ .isValid_fn = isValid_fn_ptr, .data = inlineF64(val), .tag = tag_val };
     }
 
-    pub fn initInlineU64(comptime tag_val: Tag, val: u64, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool) CompiledValidator {
+    pub fn initInlineU64(comptime tag_val: Tag, val: u64, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema, std.mem.Allocator) ?bool) CompiledValidator {
         return .{ .isValid_fn = isValid_fn_ptr, .data = inlineU64(val), .tag = tag_val };
     }
 
-    pub fn initPtr(comptime tag_val: Tag, ptr: anytype, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema) ?bool) CompiledValidator {
+    pub fn initPtr(comptime tag_val: Tag, ptr: anytype, comptime isValid_fn_ptr: *const fn (*allowzero const anyopaque, std.json.Value, *const CompiledSchema, std.mem.Allocator) ?bool) CompiledValidator {
         return .{ .isValid_fn = isValid_fn_ptr, .data = @ptrFromInt(@intFromPtr(ptr)), .tag = tag_val };
     }
 };
@@ -595,39 +595,37 @@ pub const CompiledNode = struct {
     /// Extended boolean validation. Returns null only for .generic validators.
     /// Handles more cases than isValidFast (ref_overrides, pattern without alloc).
     /// Ultra-fast boolean-only validation. No allocations, no error construction.
-    pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+    pub fn isValidFast(self: *const CompiledNode, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
         if (self.always_valid) return true;
         if (self.simple_type != .none) {
             return Validator.matchesSimpleType(instance, self.simple_type);
         }
         if (self.ref_overrides) {
-            // Follow pre-linked ref_local if available
             if (self.validators.len == 1) {
-                return isValidatorValid(self.validators[0], instance, compiled);
+                return isValidatorValid(self.validators[0], instance, compiled, alloc);
             }
             return null;
         }
-        // Unrolled loop for small validator counts (avoids loop overhead)
         const validators = self.validators;
         switch (validators.len) {
             0 => return true,
-            1 => return isValidatorValid(validators[0], instance, compiled),
+            1 => return isValidatorValid(validators[0], instance, compiled, alloc),
             2 => {
-                const r0 = isValidatorValid(validators[0], instance, compiled) orelse return null;
+                const r0 = isValidatorValid(validators[0], instance, compiled, alloc) orelse return null;
                 if (!r0) return false;
-                return isValidatorValid(validators[1], instance, compiled);
+                return isValidatorValid(validators[1], instance, compiled, alloc);
             },
             3 => {
-                const r0 = isValidatorValid(validators[0], instance, compiled) orelse return null;
+                const r0 = isValidatorValid(validators[0], instance, compiled, alloc) orelse return null;
                 if (!r0) return false;
-                const r1 = isValidatorValid(validators[1], instance, compiled) orelse return null;
+                const r1 = isValidatorValid(validators[1], instance, compiled, alloc) orelse return null;
                 if (!r1) return false;
-                return isValidatorValid(validators[2], instance, compiled);
+                return isValidatorValid(validators[2], instance, compiled, alloc);
             },
             else => {},
         }
         for (validators) |v| {
-            const result = isValidatorValid(v, instance, compiled) orelse return null;
+            const result = isValidatorValid(v, instance, compiled, alloc) orelse return null;
             if (!result) return false;
         }
         return true;
@@ -637,20 +635,20 @@ pub const CompiledNode = struct {
 /// Check if a single compiled validator is valid for an instance.
 /// Returns null if the validator can't be inlined (caller must use full path).
 /// Now dispatches through the function pointer stored in CompiledValidator.
-pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
-    return v.isValid_fn(v.data, instance, compiled);
+pub fn isValidatorValid(v: CompiledValidator, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
+    return v.isValid_fn(v.data, instance, compiled, alloc);
 }
 
 // ---------------------------------------------------------------------------
 // Standalone isValid functions — one per CompiledValidator tag
 // ---------------------------------------------------------------------------
 
-fn isValid_type_single(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_type_single(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const st = CompiledValidator.extractSimpleType(data);
     return Validator.matchesSimpleType(instance, st);
 }
 
-fn isValid_type_multi(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_type_multi(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const mask = @as(u8, @intCast(CompiledValidator.extractU64(data) & 0xFF));
     const has_integer = (mask & 4) != 0 and (mask & 8) == 0; // "integer" without "number"
     return switch (instance) {
@@ -666,7 +664,7 @@ fn isValid_type_multi(data: *allowzero const anyopaque, instance: std.json.Value
     };
 }
 
-fn isValid_enum_check(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_enum_check(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const w: *const CompiledValidator.SliceWrapper = @ptrCast(@alignCast(data));
     for (w.items) |candidate| {
         if (@import("keywords/enum_keyword.zig").jsonEqual(instance, candidate)) return true;
@@ -674,7 +672,7 @@ fn isValid_enum_check(data: *allowzero const anyopaque, instance: std.json.Value
     return false;
 }
 
-fn isValid_enum_string_set(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_enum_string_set(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const set: *const std.StringHashMap(void) = @ptrCast(@alignCast(data));
     const str = switch (instance) {
         .string => |s| s,
@@ -683,28 +681,28 @@ fn isValid_enum_string_set(data: *allowzero const anyopaque, instance: std.json.
     return set.get(str) != null;
 }
 
-fn isValid_const_check(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_const_check(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const const_val: *const std.json.Value = @ptrCast(@alignCast(data));
     return @import("keywords/enum_keyword.zig").jsonEqual(instance, const_val.*);
 }
 
-fn isValid_minimum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_minimum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     return numCmp(instance, CompiledValidator.extractF64(data), .gte);
 }
 
-fn isValid_maximum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_maximum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     return numCmp(instance, CompiledValidator.extractF64(data), .lte);
 }
 
-fn isValid_exclusive_minimum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_exclusive_minimum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     return numCmp(instance, CompiledValidator.extractF64(data), .gt);
 }
 
-fn isValid_exclusive_maximum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_exclusive_maximum(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     return numCmp(instance, CompiledValidator.extractF64(data), .lt);
 }
 
-fn isValid_multiple_of(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_multiple_of(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const divisor = CompiledValidator.extractF64(data);
     const n = getNumber(instance) orelse return true;
     if (divisor == 0) return true;
@@ -713,7 +711,7 @@ fn isValid_multiple_of(data: *allowzero const anyopaque, instance: std.json.Valu
     return @abs(remainder) <= tolerance or @abs(remainder) - @abs(divisor) >= -tolerance;
 }
 
-fn isValid_min_length(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_min_length(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const limit = CompiledValidator.extractU64(data);
     const s = switch (instance) {
         .string => |str| str,
@@ -725,7 +723,7 @@ fn isValid_min_length(data: *allowzero const anyopaque, instance: std.json.Value
     return len >= limit;
 }
 
-fn isValid_max_length(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_max_length(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const limit = CompiledValidator.extractU64(data);
     const s = switch (instance) {
         .string => |str| str,
@@ -736,7 +734,7 @@ fn isValid_max_length(data: *allowzero const anyopaque, instance: std.json.Value
     return len <= limit;
 }
 
-fn isValid_min_items(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_min_items(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const limit = CompiledValidator.extractU64(data);
     const arr = switch (instance) {
         .array => |a| a.items,
@@ -745,7 +743,7 @@ fn isValid_min_items(data: *allowzero const anyopaque, instance: std.json.Value,
     return arr.len >= limit;
 }
 
-fn isValid_max_items(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_max_items(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const limit = CompiledValidator.extractU64(data);
     const arr = switch (instance) {
         .array => |a| a.items,
@@ -754,7 +752,7 @@ fn isValid_max_items(data: *allowzero const anyopaque, instance: std.json.Value,
     return arr.len <= limit;
 }
 
-fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_unique_items(_: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const arr = switch (instance) {
         .array => |a| a.items,
         else => return true,
@@ -877,7 +875,7 @@ fn jsonValueHashFast(val: std.json.Value) u64 {
     };
 }
 
-fn isValid_required(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_required(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const w: *const CompiledValidator.StringSliceWrapper = @ptrCast(@alignCast(data));
     const obj = switch (instance) {
         .object => |o| o,
@@ -889,7 +887,7 @@ fn isValid_required(data: *allowzero const anyopaque, instance: std.json.Value, 
     return true;
 }
 
-fn isValid_min_properties(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_min_properties(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const limit = CompiledValidator.extractU64(data);
     const obj = switch (instance) {
         .object => |o| o,
@@ -898,7 +896,7 @@ fn isValid_min_properties(data: *allowzero const anyopaque, instance: std.json.V
     return obj.count() >= limit;
 }
 
-fn isValid_max_properties(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_max_properties(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const limit = CompiledValidator.extractU64(data);
     const obj = switch (instance) {
         .object => |o| o,
@@ -907,7 +905,7 @@ fn isValid_max_properties(data: *allowzero const anyopaque, instance: std.json.V
     return obj.count() <= limit;
 }
 
-fn isValid_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const w: *const CompiledValidator.PropertyEntrySliceWrapper = @ptrCast(@alignCast(data));
     const entries = w.items;
     const inst_obj = switch (instance) {
@@ -927,7 +925,7 @@ fn isValid_properties_compiled(data: *allowzero const anyopaque, instance: std.j
                             break;
                         }
                     }
-                    const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                    const result = validateLinkedSchema(entry.schema, val, compiled, alloc) orelse return null;
                     if (!result) return false;
                     break;
                 }
@@ -937,22 +935,22 @@ fn isValid_properties_compiled(data: *allowzero const anyopaque, instance: std.j
     }
     for (entries) |entry| {
         const inst_val = inst_obj.get(entry.name) orelse continue;
-        const result = validateLinkedSchema(entry.schema, inst_val, compiled) orelse return null;
+        const result = validateLinkedSchema(entry.schema, inst_val, compiled, alloc) orelse return null;
         if (!result) return false;
     }
     return true;
 }
 
-fn isValid_all_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_all_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const w: *const CompiledValidator.LinkedSchemaSliceWrapper = @ptrCast(@alignCast(data));
     for (w.items) |s| {
-        const result = validateLinkedSchema(s, instance, compiled) orelse return null;
+        const result = validateLinkedSchema(s, instance, compiled, alloc) orelse return null;
         if (!result) return false;
     }
     return true;
 }
 
-fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const oo: *const OneOfCompiled = @ptrCast(@alignCast(data));
     if (oo.discriminator_field) |field| {
         if (oo.discriminator_map) |dmap| {
@@ -963,7 +961,7 @@ fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.
             if (oo.discriminator_is_exists) {
                 for (dmap) |entry| {
                     if (inst_obj.get(entry.value) != null) {
-                        return validateLinkedSchema(entry.schema, instance, compiled);
+                        return validateLinkedSchema(entry.schema, instance, compiled, alloc);
                     }
                 }
                 return null;
@@ -975,7 +973,7 @@ fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.
             };
             for (dmap) |entry| {
                 if (disc_str.len == entry.value.len and std.mem.eql(u8, disc_str, entry.value)) {
-                    return validateLinkedSchema(entry.schema, instance, compiled);
+                    return validateLinkedSchema(entry.schema, instance, compiled, alloc);
                 }
             }
             return false;
@@ -986,12 +984,12 @@ fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.
     if (oo.schemas.len == 2) {
         const c0 = oo.schemas[0].type_mask & inst_type_mask != 0;
         const c1 = oo.schemas[1].type_mask & inst_type_mask != 0;
-        if (c0 and !c1) return validateLinkedSchema(oo.schemas[0], instance, compiled);
-        if (c1 and !c0) return validateLinkedSchema(oo.schemas[1], instance, compiled);
+        if (c0 and !c1) return validateLinkedSchema(oo.schemas[0], instance, compiled, alloc);
+        if (c1 and !c0) return validateLinkedSchema(oo.schemas[1], instance, compiled, alloc);
         if (!c0 and !c1) return false;
         // Both compatible — must check both
-        const r0 = validateLinkedSchema(oo.schemas[0], instance, compiled) orelse return null;
-        const r1 = validateLinkedSchema(oo.schemas[1], instance, compiled) orelse return null;
+        const r0 = validateLinkedSchema(oo.schemas[0], instance, compiled, alloc) orelse return null;
+        const r1 = validateLinkedSchema(oo.schemas[1], instance, compiled, alloc) orelse return null;
         return r0 != r1; // exactly one must match
     }
     var compatible_count: usize = 0;
@@ -1003,12 +1001,12 @@ fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.
         }
     }
     if (compatible_count == 1) {
-        return validateLinkedSchema(oo.schemas[last_compatible_idx], instance, compiled);
+        return validateLinkedSchema(oo.schemas[last_compatible_idx], instance, compiled, alloc);
     }
     var match_count: usize = 0;
     for (oo.schemas) |s| {
         if (s.type_mask & inst_type_mask == 0) continue;
-        const result = validateLinkedSchema(s, instance, compiled) orelse return null;
+        const result = validateLinkedSchema(s, instance, compiled, alloc) orelse return null;
         if (result) {
             match_count += 1;
             if (match_count > 1) return false;
@@ -1017,19 +1015,19 @@ fn isValid_one_of_compiled(data: *allowzero const anyopaque, instance: std.json.
     return match_count == 1;
 }
 
-fn isValid_any_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_any_of_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const w: *const CompiledValidator.LinkedSchemaSliceWrapper = @ptrCast(@alignCast(data));
     const inst_mask = typeMaskForValue(instance);
     // Fast path for 2-branch anyOf (very common: type vs expressionSyntax)
     if (w.items.len == 2) {
         const c0 = w.items[0].type_mask & inst_mask != 0;
         const c1 = w.items[1].type_mask & inst_mask != 0;
-        if (c0 and !c1) return validateLinkedSchema(w.items[0], instance, compiled);
-        if (c1 and !c0) return validateLinkedSchema(w.items[1], instance, compiled);
+        if (c0 and !c1) return validateLinkedSchema(w.items[0], instance, compiled, alloc);
+        if (c1 and !c0) return validateLinkedSchema(w.items[1], instance, compiled, alloc);
         if (!c0 and !c1) return false;
         // Both compatible — check both, track nulls
-        const r0 = validateLinkedSchema(w.items[0], instance, compiled);
-        const r1 = validateLinkedSchema(w.items[1], instance, compiled);
+        const r0 = validateLinkedSchema(w.items[0], instance, compiled, alloc);
+        const r1 = validateLinkedSchema(w.items[1], instance, compiled, alloc);
         if (r0 != null and r0.?) return true;
         if (r1 != null and r1.?) return true;
         if (r0 == null or r1 == null) return null;
@@ -1038,7 +1036,7 @@ fn isValid_any_of_compiled(data: *allowzero const anyopaque, instance: std.json.
     var any_null = false;
     for (w.items) |s| {
         if (s.type_mask & inst_mask == 0) continue;
-        if (validateLinkedSchema(s, instance, compiled)) |result| {
+        if (validateLinkedSchema(s, instance, compiled, alloc)) |result| {
             if (result) return true;
         } else {
             any_null = true;
@@ -1048,13 +1046,13 @@ fn isValid_any_of_compiled(data: *allowzero const anyopaque, instance: std.json.
     return false;
 }
 
-fn isValid_not_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_not_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const ls: *const LinkedSchema = @ptrCast(@alignCast(data));
-    const result = validateLinkedSchema(ls.*, instance, compiled) orelse return null;
+    const result = validateLinkedSchema(ls.*, instance, compiled, alloc) orelse return null;
     return !result;
 }
 
-fn isValid_items_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_items_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const ic: *const ItemsCompiled = @ptrCast(@alignCast(data));
     const arr = switch (instance) {
         .array => |a| a.items,
@@ -1078,13 +1076,13 @@ fn isValid_items_compiled(data: *allowzero const anyopaque, instance: std.json.V
         }
     }
     for (arr[ic.prefix_count..]) |item| {
-        const result = validateLinkedSchema(ic.schema, item, compiled) orelse return null;
+        const result = validateLinkedSchema(ic.schema, item, compiled, alloc) orelse return null;
         if (!result) return false;
     }
     return true;
 }
 
-fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const of: *const ObjectFastCompiled = @ptrCast(@alignCast(data));
     const obj = switch (instance) {
         .object => |o| o,
@@ -1107,15 +1105,15 @@ fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Valu
                     }
                     // Direct dispatch: skip validateLinkedSchema overhead
                     if (n.validators.len == 1 and !n.ref_overrides) {
-                        const r = n.validators[0].isValid_fn(n.validators[0].data, val, compiled) orelse return null;
+                        const r = n.validators[0].isValid_fn(n.validators[0].data, val, compiled, alloc) orelse return null;
                         if (!r) return false;
                         continue;
                     }
-                    const r = n.isValidFast(val, compiled) orelse return null;
+                    const r = n.isValidFast(val, compiled, alloc) orelse return null;
                     if (!r) return false;
                     continue;
                 }
-                const result = validateLinkedSchema(ls, val, compiled) orelse return null;
+                const result = validateLinkedSchema(ls, val, compiled, alloc) orelse return null;
                 if (!result) return false;
             } else {
                 additional_count += 1;
@@ -1138,7 +1136,7 @@ fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Valu
                             break;
                         }
                     }
-                    const result = validateLinkedSchema(entry.schema, val, compiled) orelse return null;
+                    const result = validateLinkedSchema(entry.schema, val, compiled, alloc) orelse return null;
                     if (!result) return false;
                     matched = true;
                     break;
@@ -1152,12 +1150,12 @@ fn isValid_object_fast(data: *allowzero const anyopaque, instance: std.json.Valu
     return true;
 }
 
-fn isValid_ref_local(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_ref_local(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const ls: *const LinkedSchema = @ptrCast(@alignCast(data));
-    return validateLinkedSchema(ls.*, instance, compiled);
+    return validateLinkedSchema(ls.*, instance, compiled, alloc);
 }
 
-fn isValid_additional_properties_false(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_additional_properties_false(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const ap: *const CompiledValidator.AdditionalPropertiesFalseData = @ptrCast(@alignCast(data));
     const obj = switch (instance) {
         .object => |o| o,
@@ -1194,7 +1192,7 @@ fn isValid_additional_properties_false(data: *allowzero const anyopaque, instanc
     return false;
 }
 
-fn isValid_additional_properties_schema(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_additional_properties_schema(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const ap: *const AdditionalPropsSchemaCompiled = @ptrCast(@alignCast(data));
     const obj = switch (instance) {
         .object => |o| o,
@@ -1216,30 +1214,30 @@ fn isValid_additional_properties_schema(data: *allowzero const anyopaque, instan
             }
         }
         if (!is_defined) {
-            const result = validateLinkedSchema(ap.schema, entry.value_ptr.*, compiled) orelse return null;
+            const result = validateLinkedSchema(ap.schema, entry.value_ptr.*, compiled, alloc) orelse return null;
             if (!result) return false;
         }
     }
     return true;
 }
 
-fn isValid_if_then_else_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_if_then_else_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const ite: *const IfThenElseCompiled = @ptrCast(@alignCast(data));
-    const if_result = validateLinkedSchema(ite.if_schema, instance, compiled) orelse return null;
+    const if_result = validateLinkedSchema(ite.if_schema, instance, compiled, alloc) orelse return null;
     if (if_result) {
         if (ite.then_schema) |ts| {
-            return validateLinkedSchema(ts, instance, compiled);
+            return validateLinkedSchema(ts, instance, compiled, alloc);
         }
         return true;
     } else {
         if (ite.else_schema) |es| {
-            return validateLinkedSchema(es, instance, compiled);
+            return validateLinkedSchema(es, instance, compiled, alloc);
         }
         return true;
     }
 }
 
-fn isValid_unevaluated_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_unevaluated_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const up: *const UnevalPropsCompiled = @ptrCast(@alignCast(data));
     if (up.all_covered) return true;
     const obj = switch (instance) {
@@ -1273,7 +1271,7 @@ fn isValid_unevaluated_properties_compiled(data: *allowzero const anyopaque, ins
     return true;
 }
 
-fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const cr: *const CompiledRegex = @ptrCast(@alignCast(data));
     const instance_str = switch (instance) {
         .string => |s| s,
@@ -1313,7 +1311,7 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
     return null;
 }
 
-fn isValid_dependent_required_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_dependent_required_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const w: *const CompiledValidator.DependentRequiredSliceWrapper = @ptrCast(@alignCast(data));
     const obj = switch (instance) {
         .object => |o| o,
@@ -1329,7 +1327,7 @@ fn isValid_dependent_required_compiled(data: *allowzero const anyopaque, instanc
     return true;
 }
 
-fn isValid_contains_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_contains_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const cc: *const ContainsCompiled = @ptrCast(@alignCast(data));
     const arr = switch (instance) {
         .array => |a| a.items,
@@ -1337,7 +1335,7 @@ fn isValid_contains_compiled(data: *allowzero const anyopaque, instance: std.jso
     };
     var match_count: usize = 0;
     for (arr) |item| {
-        if (validateLinkedSchema(cc.schema, item, compiled)) |result| {
+        if (validateLinkedSchema(cc.schema, item, compiled, alloc)) |result| {
             if (result) {
                 match_count += 1;
                 if (cc.max_contains) |max| {
@@ -1352,7 +1350,7 @@ fn isValid_contains_compiled(data: *allowzero const anyopaque, instance: std.jso
     return true;
 }
 
-fn isValid_prefix_items_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_prefix_items_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const w: *const CompiledValidator.LinkedSchemaSliceWrapper = @ptrCast(@alignCast(data));
     const schemas = w.items;
     const arr = switch (instance) {
@@ -1361,13 +1359,13 @@ fn isValid_prefix_items_compiled(data: *allowzero const anyopaque, instance: std
     };
     const count = @min(arr.len, schemas.len);
     for (0..count) |i| {
-        const result = validateLinkedSchema(schemas[i], arr[i], compiled) orelse return null;
+        const result = validateLinkedSchema(schemas[i], arr[i], compiled, alloc) orelse return null;
         if (!result) return false;
     }
     return true;
 }
 
-fn isValid_dependent_schemas_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_dependent_schemas_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const w: *const CompiledValidator.DependentSchemaSliceWrapper = @ptrCast(@alignCast(data));
     const obj = switch (instance) {
         .object => |o| o,
@@ -1375,14 +1373,14 @@ fn isValid_dependent_schemas_compiled(data: *allowzero const anyopaque, instance
     };
     for (w.items) |dep| {
         if (obj.get(dep.trigger) != null) {
-            const result = validateLinkedSchema(dep.schema, instance, compiled) orelse return null;
+            const result = validateLinkedSchema(dep.schema, instance, compiled, alloc) orelse return null;
             if (!result) return false;
         }
     }
     return true;
 }
 
-fn isValid_property_names_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_property_names_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const ls: *const LinkedSchema = @ptrCast(@alignCast(data));
     const obj = switch (instance) {
         .object => |o| o,
@@ -1393,7 +1391,7 @@ fn isValid_property_names_compiled(data: *allowzero const anyopaque, instance: s
             const keys = obj.keys();
             for (keys) |key| {
                 const name_val = std.json.Value{ .string = key };
-                if (pnode.isValidFast(name_val, compiled)) |result| {
+                if (pnode.isValidFast(name_val, compiled, alloc)) |result| {
                     if (!result) return false;
                 } else return null;
             }
@@ -1403,7 +1401,7 @@ fn isValid_property_names_compiled(data: *allowzero const anyopaque, instance: s
     return null;
 }
 
-fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     const w: *const CompiledValidator.PatternPropertySliceWrapper = @ptrCast(@alignCast(data));
     const pp_entries = w.items;
     const obj = switch (instance) {
@@ -1423,7 +1421,7 @@ fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instanc
         for (pp_entries) |pp_entry| {
             const matched = pp_entry.regex.matches(key, null);
             if (matched) {
-                const result = validateLinkedSchema(pp_entry.schema, val, compiled) orelse return null;
+                const result = validateLinkedSchema(pp_entry.schema, val, compiled, alloc) orelse return null;
                 if (!result) return false;
             }
         }
@@ -1431,7 +1429,7 @@ fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instanc
     return true;
 }
 
-fn isValid_generic(_: *allowzero const anyopaque, _: std.json.Value, _: *const CompiledSchema) ?bool {
+fn isValid_generic(_: *allowzero const anyopaque, _: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     return null;
 }
 
@@ -1663,15 +1661,14 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
     return true;
 }
 
-fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *const CompiledSchema) ?bool {
+fn validateLinkedSchema(ls: LinkedSchema, instance: std.json.Value, compiled: *const CompiledSchema, alloc: Allocator) ?bool {
     if (ls.node) |node| {
         if (node.always_valid) return true;
         if (node.simple_type != .none) return Validator.matchesSimpleType(instance, node.simple_type);
-        // Fast path: 1-validator nodes skip isValidFast loop setup
         if (node.validators.len == 1 and !node.ref_overrides) {
-            return node.validators[0].isValid_fn(node.validators[0].data, instance, compiled);
+            return node.validators[0].isValid_fn(node.validators[0].data, instance, compiled, alloc);
         }
-        return node.isValidFast(instance, compiled);
+        return node.isValidFast(instance, compiled, alloc);
     }
     return switch (ls.value) {
         .bool => |b| b,
