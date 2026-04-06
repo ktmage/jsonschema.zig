@@ -1,7 +1,7 @@
 # jsonschema.zig
 
-> [!NOTE]
-> This entire project — code, tests, optimizations, benchmarks, and this README — was written by [Claude Code](https://claude.ai/claude-code). Human involvement was limited to directing what to build. We've audited for correctness (17 bugs found and fixed), but there may still be issues with the validator or benchmarks. **Take these numbers with a grain of salt.** If you spot anything off, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — we'll fix it fast.
+> [!WARNING]
+> This entire project — code, tests, optimizations, benchmarks, and this README — was autonomously written by [Claude Code](https://claude.ai/claude-code). No human reviewed the benchmark methodology or verified these numbers are fair. The AI may have unknowingly introduced shortcuts that inflate performance, or configured benchmarks in ways that favor this implementation. We found and fixed 17 correctness bugs during audits, but more may exist. **Treat these benchmarks as rough, unverified estimates — not rigorous measurements.** If you find anything wrong, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — it will be fixed immediately.
 
 A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant**, zero external dependencies, and built for performance.
 
