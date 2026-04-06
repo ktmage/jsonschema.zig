@@ -68,6 +68,8 @@ pub const Context = struct {
     /// When true, validateAll returns on first error without collecting details.
     /// Used by isSubschemaValid compiled direct path for zero-allocation boolean check.
     bool_only: bool = false,
+    /// When true, the "format" keyword is validated (not just annotated).
+    validate_formats: bool = false,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -430,6 +432,8 @@ pub const keyword_table = .{
     // Reference
     .{ "$ref", @import("keywords/ref.zig").validate },
     .{ "$dynamicRef", @import("keywords/dynamic_ref.zig").validate },
+    // Format (opt-in validation)
+    .{ "format", @import("keywords/format.zig").validate },
     // Conditional
     .{ "if", @import("keywords/if_then_else.zig").validate },
     // Unevaluated (must be last — depends on other keywords' evaluations)
