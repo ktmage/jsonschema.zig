@@ -30,11 +30,10 @@ pub fn validate(ctx: Context) void {
         const posix_pat = compiled_mod.convertEcmaToPostfix(ctx.allocator, pattern) catch pattern;
         const pattern_z = ctx.allocator.dupeZ(u8, posix_pat) catch continue;
 
-        const regex = ctx.allocator.create(c.regex_t) catch continue;
-        defer ctx.allocator.destroy(regex);
-        const comp_result = c.regcomp(regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+        var regex: c.regex_t = undefined;
+        const comp_result = c.regcomp(&regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
         if (comp_result != 0) continue;
-        defer c.regfree(regex);
+        defer c.regfree(&regex);
 
         var instance_it = instance_obj.iterator();
         while (instance_it.next()) |instance_entry| {
@@ -44,7 +43,7 @@ pub fn validate(ctx: Context) void {
             // Null-terminate the property name for POSIX regex
             const prop_name_z = ctx.allocator.dupeZ(u8, prop_name) catch continue;
 
-            if (c.regexec(regex, prop_name_z.ptr, 0, null, 0) == 0) {
+            if (c.regexec(&regex, prop_name_z.ptr, 0, null, 0) == 0) {
                 // Track evaluated property for unevaluatedProperties
                 if (ctx.evaluated_props) |ep| {
                     ep.put(prop_name, {}) catch {};
@@ -86,13 +85,12 @@ pub fn matchesAnyPattern(allocator: std.mem.Allocator, prop_name: []const u8, pa
         const posix_pat2 = compiled_mod.convertEcmaToPostfix(allocator, pattern) catch pattern;
         const pattern_z = allocator.dupeZ(u8, posix_pat2) catch continue;
 
-        const regex = allocator.create(c.regex_t) catch continue;
-        defer allocator.destroy(regex);
-        const comp_result = c.regcomp(regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+        var regex: c.regex_t = undefined;
+        const comp_result = c.regcomp(&regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
         if (comp_result != 0) continue;
-        defer c.regfree(regex);
+        defer c.regfree(&regex);
 
-        if (c.regexec(regex, prop_name_z.ptr, 0, null, 0) == 0) {
+        if (c.regexec(&regex, prop_name_z.ptr, 0, null, 0) == 0) {
             return true;
         }
     }
