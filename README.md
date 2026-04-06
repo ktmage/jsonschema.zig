@@ -14,7 +14,7 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 | helm-chart-lock | **9 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
 | dependabot | **17 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
 | geojson | **42 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
-| openapi | 1,213 ms | 7,454 ms | 4,219 ms | **262 ms** | 345,985 ms |
+| openapi | **345 ms** | 7,454 ms | 4,219 ms | 262 ms | 345,985 ms |
 | tsconfig | **43 ms** | 89 ms | 367 ms | — | 4,475 ms |
 | github-workflow | 66 ms | **56 ms** | 1,259 ms | 300 ms | 21,693 ms |
 | package-json | **41 ms** | — | — | — | 3,163 ms |
