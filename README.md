@@ -4,6 +4,19 @@
 
 A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant**, zero external dependencies, and built for performance.
 
+**Warm mode** — schema pre-compiled, 550 instances × 100 iterations ([details](#performance)):
+
+| Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
+|---------|----:|-----:|---:|----:|-------:|
+| helm-chart-lock | **9 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
+| dependabot | **17 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
+| geojson | **42 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
+| openapi | 1,213 ms | 7,454 ms | 4,219 ms | **262 ms** | 345,985 ms |
+| tsconfig | **43 ms** | 89 ms | 367 ms | — | 4,475 ms |
+| github-workflow | 66 ms | **56 ms** | 1,259 ms | 300 ms | 21,693 ms |
+| package-json | **41 ms** | — | — | — | 3,163 ms |
+| cspell | **76 ms** | — | — | 244 ms | 5,468 ms |
+
 - **Full specification coverage**: Draft 7 (920/920 tests) and Draft 2020-12 (1142/1142 tests) with 100% pass rate against the official [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
 - **Zero dependencies**: Pure Zig, only `std` — no C libraries, no allocator hacks
 - **Compiled schema mode**: Pre-compile schemas once, validate many times with pre-linked sub-schema dispatch and zero-allocation fast paths
@@ -142,20 +155,7 @@ for (result.errors) |err| {
 
 ## Performance
 
-Benchmarked against major JSON Schema validators across 5 languages. All measurements use Docker containers, median of 5 runs, 100 warm iterations, boolean-only validation (`is_valid`), 550 synthetically generated instances per dataset (500 valid + 50 invalid).
-
-**Warm mode** (schema pre-compiled, repeated validation) — lower is better:
-
-| Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
-|---------|----:|-----:|---:|-----------:|-------:|
-| helm-chart-lock | **9 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
-| dependabot | **17 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
-| geojson | **42 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
-| openapi | 1,213 ms | 7,454 ms | 4,219 ms | **262 ms** | 345,985 ms |
-| tsconfig | **43 ms** | 89 ms | 367 ms | — | 4,475 ms |
-| github-workflow | 66 ms | **56 ms** | 1,259 ms | 300 ms | 21,693 ms |
-| package-json | **41 ms** | — | — | — | 3,163 ms |
-| cspell | **76 ms** | — | — | 244 ms | 5,468 ms |
+Benchmarked against major JSON Schema validators across 5 languages. All measurements use Docker containers, median of 5 runs, 100 warm iterations, boolean-only validation (`is_valid`), 550 synthetically generated instances per dataset (500 valid + 50 invalid). See [warm mode table above](#jsonschemazig) for full results.
 
 **Cold mode** (schema compilation + single validation pass):
 
