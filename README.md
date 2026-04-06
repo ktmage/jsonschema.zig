@@ -20,18 +20,18 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 | package-json | **41 ms** | — | — | — | 3,163 ms |
 | cspell | **76 ms** | — | — | 244 ms | 5,468 ms |
 
-**Cold mode** — schema compilation + single validation pass:
+**Cold mode** — schema compilation + single validation pass per instance (550 compile+validate cycles):
 
 | Dataset | jsonschema.zig | jsonschema (Rust) | jsonschema (Go) | Ajv (JS) | jsonschema (Python) |
 |---------|----:|-----:|---:|----:|-------:|
-| helm-chart-lock | **0.1 ms** | 14 ms | 95 ms | 222 ms | 25 ms |
-| dependabot | **0.2 ms** | 54 ms | 263 ms | 582 ms | 28 ms |
-| geojson | **0.9 ms** | 326 ms | 1,599 ms | 7,726 ms | 294 ms |
-| openapi | **15 ms** | 12,262 ms | 1,886 ms | 4,176 ms | 3,381 ms |
-| tsconfig | **1.5 ms** | 2,196 ms | 2,014 ms | — | 50 ms |
-| github-workflow | **2.1 ms** | 568 ms | 1,834 ms | 7,604 ms | 225 ms |
-| package-json | **1.5 ms** | 201 ms | 1,130 ms | — | 36 ms |
-| cspell | **2.1 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
+| helm-chart-lock | **10 ms** | 14 ms | 95 ms | 222 ms | 25 ms |
+| dependabot | **22 ms** | 54 ms | 263 ms | 582 ms | 28 ms |
+| geojson | **96 ms** | 326 ms | 1,599 ms | 7,726 ms | 294 ms |
+| openapi | **177 ms** | 12,262 ms | 1,886 ms | 4,176 ms | 3,381 ms |
+| tsconfig | **183 ms** | 2,196 ms | 2,014 ms | — | 50 ms |
+| github-workflow | **127 ms** | 568 ms | 1,834 ms | 7,604 ms | 225 ms |
+| package-json | **113 ms** | 201 ms | 1,130 ms | — | 36 ms |
+| cspell | **123 ms** | 257 ms | 1,590 ms | 4,720 ms | 61 ms |
 
 <details>
 <summary id="benchmark-details">Benchmark details</summary>
