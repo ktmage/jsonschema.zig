@@ -1409,7 +1409,7 @@ pub fn validateAll(ctx: Context) void {
                         if (!cr.valid) continue;
                         const instance_z = ctx.allocator.dupeZ(u8, instance_str) catch continue;
                         defer ctx.allocator.free(instance_z);
-                        if (compiled_mod.c.regexec(&cr.regex, instance_z.ptr, 0, null, 0) != 0) {
+                        if (compiled_mod.c.regexec(cr.regex, instance_z.ptr, 0, null, 0) != 0) {
                             ctx.addError("pattern", "String does not match pattern");
                         }
                     },

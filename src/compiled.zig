@@ -125,7 +125,7 @@ pub const CompiledSchema = struct {
         // Free POSIX regex internal allocations before the arena is torn down
         for (self.compiled_regexes) |cr| {
             if (cr.valid) {
-                c.regfree(&cr.regex);
+                c.regfree(cr.regex);
             }
         }
         self.arena.deinit();
@@ -344,7 +344,7 @@ pub const CharClassMode = enum { first_char, all_chars, all_chars_optional };
 
 /// A pre-compiled POSIX regex stored in the arena.
 pub const CompiledRegex = struct {
-    regex: c.regex_t,
+    regex: *c.regex_t,
     valid: bool,
     /// Fast bytecode-compiled regex (11x faster than POSIX, handles \d \w \s)
     fast: ?FastRegex = null,
@@ -393,13 +393,13 @@ pub const CompiledRegex = struct {
         // POSIX fallback
         if (allocator) |alloc| {
             const str_z = alloc.dupeZ(u8, str) catch return false;
-            return c.regexec(&self.regex, str_z.ptr, 0, null, 0) == 0;
+            return c.regexec(self.regex, str_z.ptr, 0, null, 0) == 0;
         }
         if (str.len < 512) {
             var buf: [512]u8 = undefined;
             @memcpy(buf[0..str.len], str);
             buf[str.len] = 0;
-            return c.regexec(&self.regex, &buf, 0, null, 0) == 0;
+            return c.regexec(self.regex, &buf, 0, null, 0) == 0;
         }
         return false;
     }
@@ -1261,7 +1261,7 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
         var buf: [512]u8 = undefined;
         @memcpy(buf[0..instance_str.len], instance_str);
         buf[instance_str.len] = 0;
-        return c.regexec(&cr.regex, &buf, 0, null, 0) == 0;
+        return c.regexec(cr.regex, &buf, 0, null, 0) == 0;
     }
     return null;
 }
@@ -2903,6 +2903,8 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
         else => return null,
     };
     const cr = alloc.create(CompiledRegex) catch return null;
+    const regex_ptr = alloc.create(c.regex_t) catch return null;
+    cr.regex = regex_ptr;
     cr.simple_prefix = detectSimplePrefix(pattern_str) orelse detectEscapedPrefix(alloc, pattern_str);
     cr.is_identifier = isIdentifierPattern(pattern_str);
     cr.char_class = null;
@@ -2924,7 +2926,7 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     // Convert ECMA-262 shortcuts (\d, \w, \s) to POSIX ERE equivalents
     const posix_pattern = convertEcmaToPostfix(alloc, pattern_str) catch pattern_str;
     const pattern_z = alloc.dupeZ(u8, posix_pattern) catch return null;
-    const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+    const comp_result = c.regcomp(cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
     cr.valid = comp_result == 0;
     cr.fast = FastRegex.compile(pattern_str, alloc);
     regex_list.append(cr) catch {};
@@ -3326,6 +3328,8 @@ fn compilePatternProperties(
         const posix_pat = convertEcmaToPostfix(alloc, pattern) catch pattern;
         const pattern_z = alloc.dupeZ(u8, posix_pat) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
+        const regex_ptr = alloc.create(c.regex_t) catch continue;
+        cr.regex = regex_ptr;
         cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
         cr.is_identifier = isIdentifierPattern(pattern);
         cr.char_class = null;
@@ -3342,7 +3346,7 @@ fn compilePatternProperties(
                 cr.ci_literal = ci;
             }
         }
-        const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+        const comp_result = c.regcomp(cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
         cr.valid = comp_result == 0;
         cr.fast = FastRegex.compile(pattern, alloc);
         regex_list.append(cr) catch {};
@@ -3590,6 +3594,8 @@ fn collectStaticCeiling(
                 const posix_pat2 = convertEcmaToPostfix(alloc, pattern) catch pattern;
                 const pattern_z = alloc.dupeZ(u8, posix_pat2) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
+                const regex_ptr3 = alloc.create(c.regex_t) catch continue;
+                cr.regex = regex_ptr3;
                 cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
                 cr.is_identifier = isIdentifierPattern(pattern);
                 cr.char_class = null;
@@ -3604,7 +3610,7 @@ fn collectStaticCeiling(
                         cr.literal_set = lset;
                     }
                 }
-                const comp_result = c.regcomp(&cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
+                const comp_result = c.regcomp(cr.regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
                 cr.valid = comp_result == 0;
                 cr.fast = FastRegex.compile(pattern, alloc);
                 regex_list.append(cr) catch {};
