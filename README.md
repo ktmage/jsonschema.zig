@@ -12,26 +12,26 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 | Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
 |---------|----:|-----:|---:|----:|-------:|
 | helm-chart-lock | **6 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
-| dependabot | **15 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
-| geojson | **38 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
-| openapi | **186 ms** | 7,454 ms | 4,219 ms | **262 ms** | 345,985 ms |
-| tsconfig | **5 ms** | 89 ms | 367 ms | — | 4,475 ms |
-| github-workflow | **26 ms** | 56 ms | 1,259 ms | 300 ms | 21,693 ms |
-| package-json | **24 ms** | — | — | — | 3,163 ms |
-| cspell | **18 ms** | — | — | 244 ms | 5,468 ms |
+| dependabot | **17 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
+| geojson | **46 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
+| openapi | **211 ms** | 7,454 ms | 4,219 ms | **262 ms** | 345,985 ms |
+| tsconfig | **27 ms** | 89 ms | 367 ms | — | 4,475 ms |
+| github-workflow | **50 ms** | 56 ms | 1,259 ms | 300 ms | 21,693 ms |
+| package-json | **53 ms** | — | — | — | 3,163 ms |
+| cspell | **23 ms** | — | — | 244 ms | 5,468 ms |
 
 **Cold mode** — per-instance median of schema compilation + single validation (550 cycles, Docker-isolated):
 
 | Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
 |---------|----:|-----:|---:|----:|-------:|
 | helm-chart-lock | **14 us** | 14 us | 156 us | 302 us | 46 us |
-| dependabot | **35 us** | 84 us | 379 us | 885 us | 53 us |
-| geojson | **181 us** | 545 us | 2,796 us | 13,796 us | 379 us |
-| openapi | **399 us** | 22,841 us | 2,940 us | 7,225 us | 5,511 us |
-| tsconfig | **678 us** | 3,909 us | 3,376 us | — | 87 us |
-| github-workflow | **293 us** | 947 us | 3,261 us | 13,269 us | 384 us |
-| package-json | 422 us | **335 us** | 1,898 us | — | 65 us |
-| cspell | **271 us** | 432 us | 2,652 us | 8,530 us | 105 us |
+| dependabot | **36 us** | 84 us | 379 us | 885 us | 53 us |
+| geojson | **185 us** | 545 us | 2,796 us | 13,796 us | 379 us |
+| openapi | **291 us** | 22,841 us | 2,940 us | 7,225 us | 5,511 us |
+| tsconfig | **294 us** | 3,909 us | 3,376 us | — | 87 us |
+| github-workflow | **233 us** | 947 us | 3,261 us | 13,269 us | 384 us |
+| package-json | **192 us** | 335 us | 1,898 us | — | 65 us |
+| cspell | **250 us** | 432 us | 2,652 us | 8,530 us | 105 us |
 
 <details>
 <summary id="benchmark-details">Benchmark details</summary>
@@ -47,7 +47,7 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 </details>
 
 - **Full specification coverage**: Draft 7 (920/920 tests) and Draft 2020-12 (1275/1275 tests) with 100% pass rate against the official [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
-- **ECMA-262 regex support**: Two-tier regex engine — FastRegex (custom bytecode, fastest) with [QuickJS libregexp](https://bellard.org/quickjs/) fallback (full ECMA-262 including lookahead)
+- **ECMA-262 regex support**: [QuickJS libregexp](https://bellard.org/quickjs/) — full ECMA-262 compliance including lookahead, backreferences, and Unicode
 - **Compiled schema mode**: Pre-compile schemas once, validate many times with pre-linked sub-schema dispatch and zero-allocation fast paths
 - **Detailed error reporting**: JSON Pointer paths to both the failing instance location and the schema keyword that rejected it
 

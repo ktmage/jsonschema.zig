@@ -47,8 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `contains.zig` invalid `minContains` skipping contains check
   - `anyOf` null propagation in compiled path
 
+### Removed
+- FastRegex custom bytecode engine and all pattern-specific fast paths (prefix, identifier, bitmap, literal set) — replaced by single-tier EcmaRegex (QuickJS libregexp)
+- POSIX regex dependency (`regex.h`, `regcomp`, `regexec`, `regfree`) — fully replaced by EcmaRegex
+- `convertEcmaToPostfix` ECMA→POSIX conversion (no longer needed)
+
 ### Changed
-- Three-tier regex architecture: FastRegex → POSIX ERE → QuickJS libregexp (ECMA-262)
+- Single-tier regex architecture: EcmaRegex (QuickJS libregexp, ECMA-262 compliant)
 - `CompiledValidator` reduced from 240 bytes to 40 bytes
 - String hash now samples first+last 16 bytes for better bloom filter distribution
 - `isValid_type_multi` uses pre-computed bitmask instead of linear SimpleType iteration
@@ -57,11 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All validators re-linked after compilation (multi-pass convergence)
 
 ### Performance
-- openapi warm: 1,330ms → 340ms (-74%) — external $ref compilation + full fast-path coverage
-- tsconfig warm: 38ms → 5ms (-87%) — local $ref re-linking
-- github-workflow warm: 62ms → 26ms (-57%) — local $ref re-linking
-- cspell warm: 72ms → 21ms (-71%) — ECMA-262 regex (lookahead) via QuickJS libregexp
-- Zero-allocation fast paths for all common schema patterns
+- openapi warm: 1,330ms → 211ms (-84%) — external $ref compilation + full fast-path coverage
+- tsconfig warm: 38ms → 27ms (-29%) — local $ref re-linking
+- github-workflow warm: 62ms → 50ms (-19%) — local $ref re-linking
+- cspell warm: 72ms → 23ms (-68%) — ECMA-262 regex (lookahead) via QuickJS libregexp
+- Zero-allocation fast paths for common schema patterns
 
 ## [0.1.0] - 2026-03-25
 
