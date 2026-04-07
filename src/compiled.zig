@@ -1789,15 +1789,21 @@ fn relinkValidator(v: *const CompiledValidator, node_map: *const CompiledSchema.
     switch (v.tag) {
         .properties_compiled => {
             const w: *const CompiledValidator.PropertyEntrySliceWrapper = v.getData(*const CompiledValidator.PropertyEntrySliceWrapper);
-            for (@constCast(w.items)) |*entry| { if (relinkLinkedSchema(&entry.schema, node_map)) changed = true; }
+            for (@constCast(w.items)) |*entry| {
+                if (relinkLinkedSchema(&entry.schema, node_map)) changed = true;
+            }
         },
         .all_of_compiled, .any_of_compiled, .prefix_items_compiled => {
             const w: *const CompiledValidator.LinkedSchemaSliceWrapper = v.getData(*const CompiledValidator.LinkedSchemaSliceWrapper);
-            for (@constCast(w.items)) |*ls| { if (relinkLinkedSchema(ls, node_map)) changed = true; }
+            for (@constCast(w.items)) |*ls| {
+                if (relinkLinkedSchema(ls, node_map)) changed = true;
+            }
         },
         .one_of_compiled => {
             const oo: *OneOfCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
-            for (@constCast(oo.schemas)) |*ls| { if (relinkLinkedSchema(ls, node_map)) changed = true; }
+            for (@constCast(oo.schemas)) |*ls| {
+                if (relinkLinkedSchema(ls, node_map)) changed = true;
+            }
         },
         .items_compiled => {
             const ic: *ItemsCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
@@ -1810,8 +1816,12 @@ fn relinkValidator(v: *const CompiledValidator, node_map: *const CompiledSchema.
         .if_then_else_compiled => {
             const ite: *IfThenElseCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
             if (relinkLinkedSchema(&ite.if_schema, node_map)) changed = true;
-            if (ite.then_schema) |*ts| { if (relinkLinkedSchema(ts, node_map)) changed = true; }
-            if (ite.else_schema) |*es| { if (relinkLinkedSchema(es, node_map)) changed = true; }
+            if (ite.then_schema) |*ts| {
+                if (relinkLinkedSchema(ts, node_map)) changed = true;
+            }
+            if (ite.else_schema) |*es| {
+                if (relinkLinkedSchema(es, node_map)) changed = true;
+            }
         },
         .contains_compiled => {
             const cc: *ContainsCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
@@ -1819,11 +1829,15 @@ fn relinkValidator(v: *const CompiledValidator, node_map: *const CompiledSchema.
         },
         .dependent_schemas_compiled => {
             const w: *const CompiledValidator.DependentSchemaSliceWrapper = v.getData(*const CompiledValidator.DependentSchemaSliceWrapper);
-            for (@constCast(w.items)) |*dep| { if (relinkLinkedSchema(&dep.schema, node_map)) changed = true; }
+            for (@constCast(w.items)) |*dep| {
+                if (relinkLinkedSchema(&dep.schema, node_map)) changed = true;
+            }
         },
         .pattern_properties_compiled => {
             const w: *const CompiledValidator.PatternPropertySliceWrapper = v.getData(*const CompiledValidator.PatternPropertySliceWrapper);
-            for (@constCast(w.items)) |*entry| { if (relinkLinkedSchema(&entry.schema, node_map)) changed = true; }
+            for (@constCast(w.items)) |*entry| {
+                if (relinkLinkedSchema(&entry.schema, node_map)) changed = true;
+            }
         },
         .additional_properties_schema => {
             const aps: *AdditionalPropsSchemaCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
@@ -1831,7 +1845,9 @@ fn relinkValidator(v: *const CompiledValidator, node_map: *const CompiledSchema.
         },
         .object_fast => {
             const of: *ObjectFastCompiled = @constCast(@ptrCast(@alignCast(@as(*const anyopaque, @ptrFromInt(@intFromPtr(v.data))))));
-            for (@constCast(of.properties)) |*entry| { if (relinkLinkedSchema(&entry.schema, node_map)) changed = true; }
+            for (@constCast(of.properties)) |*entry| {
+                if (relinkLinkedSchema(&entry.schema, node_map)) changed = true;
+            }
         },
         else => {},
     }
@@ -2994,11 +3010,21 @@ fn fixCharClassDashes(alloc: Allocator, pattern: []const u8) ?[]const u8 {
             i += 2;
             continue;
         }
-        if (pattern[i] != '[') { buf.append(pattern[i]) catch return null; i += 1; continue; }
+        if (pattern[i] != '[') {
+            buf.append(pattern[i]) catch return null;
+            i += 1;
+            continue;
+        }
         buf.append('[') catch return null;
         i += 1;
-        if (i < pattern.len and pattern[i] == '^') { buf.append('^') catch return null; i += 1; }
-        if (i < pattern.len and pattern[i] == ']') { buf.append(']') catch return null; i += 1; }
+        if (i < pattern.len and pattern[i] == '^') {
+            buf.append('^') catch return null;
+            i += 1;
+        }
+        if (i < pattern.len and pattern[i] == ']') {
+            buf.append(']') catch return null;
+            i += 1;
+        }
         var extra_dash = false;
         while (i < pattern.len and pattern[i] != ']') {
             if (pattern[i] == '\\' and i + 1 < pattern.len) {
@@ -3034,7 +3060,10 @@ fn fixCharClassDashes(alloc: Allocator, pattern: []const u8) ?[]const u8 {
             i += 1;
         }
         if (extra_dash) buf.append('-') catch return null;
-        if (i < pattern.len) { buf.append(']') catch return null; i += 1; }
+        if (i < pattern.len) {
+            buf.append(']') catch return null;
+            i += 1;
+        }
     }
     if (!modified) return null;
     return buf.toOwnedSlice() catch null;
@@ -3562,7 +3591,7 @@ fn compilePatternProperties(
         const pattern_z = alloc.dupeZ(u8, posix_pat) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
         cr.cached_regex = null;
-    cr.ecma = null;
+        cr.ecma = null;
         cr.pattern_z = pattern_z.ptr;
         cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
         cr.is_identifier = isIdentifierPattern(pattern);
@@ -3838,7 +3867,7 @@ fn collectStaticCeiling(
                 const pattern_z = alloc.dupeZ(u8, posix_pat2) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
                 cr.cached_regex = null;
-    cr.ecma = null;
+                cr.ecma = null;
                 cr.pattern_z = pattern_z.ptr;
                 cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
                 cr.is_identifier = isIdentifierPattern(pattern);
