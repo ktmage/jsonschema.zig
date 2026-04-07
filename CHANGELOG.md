@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Custom FastRegex bytecode engine replacing POSIX `regexec` for most patterns
+- QuickJS libregexp integration for ECMA-262 regex support (lookahead, Unicode)
 - Bloom filter for O(n) `uniqueItems` validation (replacing O(n²) pairwise comparison)
 - `isValidCompiled` API for zero-allocation boolean-only validation
 - `CompiledSchema` function pointer dispatch (replacing tagged union switch)
@@ -18,9 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Case-insensitive literal detection for regex patterns
 - Nested array fast path for coordinate-style validation
 - `bool_only` propagation for zero-allocation sub-schema validation
+- External `$ref` schemas compiled into CompiledSchema for full fast-path coverage
+- Custom keyword extension API (`CustomKeyword`)
+- Optional format validation (opt-in via `validate_formats` flag)
+- `memoryUsage()` API on CompiledSchema
 - Benchmark results in README (vs Rust, Go, JS, Python implementations)
+- GitHub Actions CI (Ubuntu + macOS, zig fmt check)
+- CHANGELOG, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT documentation
 
 ### Fixed
+- External `$ref` schemas not compiled — caused 26% of validations to fall back to slow path for openapi
+- Circular/late-bound local `$ref` not re-linked after compilation — caused slow path fallback for tsconfig, github-workflow, cspell
+- Character class dash positioning for POSIX ERE compatibility (`[a-z0-9-~]` → `[a-z0-9~-]`)
+- `regex_t` opaque type on Linux/glibc — heap-allocate via C malloc instead of struct embedding
+- `object_fast` required_mask overflow for schemas with >64 properties
+- Memory leak in `makeSingleError` and `addError` on partial allocation failure
+- `CustomKeyword` dependency loop in ReleaseFast builds
 - 17 correctness bugs found during code audit:
   - ECMA-262 `\d`, `\w`, `\s` shortcuts now converted to POSIX ERE equivalents
   - `(?:...)` non-capturing groups converted to `(...)` for POSIX ERE compatibility
@@ -34,15 +48,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `anyOf` null propagation in compiled path
 
 ### Changed
+- Three-tier regex architecture: FastRegex → POSIX ERE → QuickJS libregexp (ECMA-262)
 - `CompiledValidator` reduced from 240 bytes to 40 bytes
 - String hash now samples first+last 16 bytes for better bloom filter distribution
 - `isValid_type_multi` uses pre-computed bitmask instead of linear SimpleType iteration
 - `isValidationKeyword` uses `StaticStringMap` for O(1) lookup
+- Fast-path functions now accept Allocator parameter (enables future optimizations)
+- All validators re-linked after compilation (multi-pass convergence)
 
 ### Performance
-- Warm mode: 2-15x faster than v0.1.0 across all benchmark datasets
-- Cold mode: 10-800x faster compilation + validation vs other libraries
-- Zero-allocation fast paths for common schema patterns
+- openapi warm: 1,330ms → 340ms (-74%) — external $ref compilation + full fast-path coverage
+- tsconfig warm: 38ms → 5ms (-87%) — local $ref re-linking
+- github-workflow warm: 62ms → 26ms (-57%) — local $ref re-linking
+- cspell warm: 72ms → 21ms (-71%) — ECMA-262 regex (lookahead) via QuickJS libregexp
+- Zero-allocation fast paths for all common schema patterns
 
 ## [0.1.0] - 2026-03-25
 

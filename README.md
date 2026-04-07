@@ -5,20 +5,20 @@
 > [!WARNING]
 > This entire project — code, tests, optimizations, benchmarks, and this README — was autonomously written by [Claude Code](https://claude.ai/claude-code). No human reviewed the benchmark methodology or verified these numbers are fair. The AI may have unknowingly introduced shortcuts that inflate performance, or configured benchmarks in ways that favor this implementation. We found and fixed 17 correctness bugs during audits, but more may exist. **Treat these benchmarks as rough, unverified estimates — not rigorous measurements.** If you find anything wrong, please [open an issue](https://github.com/ktmage/jsonschema.zig/issues) — it will be fixed immediately.
 
-A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant**, zero external dependencies, and built for performance.
+A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-compliant** and built for performance.
 
 **Warm mode** — schema pre-compiled, 550 instances × 100 iterations ([methodology](#benchmark-details)):
 
 | Dataset | jsonschema.zig | [jsonschema](https://crates.io/crates/jsonschema) (Rust) | [jsonschema](https://github.com/santhosh-tekuri/jsonschema) (Go) | [Ajv](https://ajv.js.org/) (JS) | [jsonschema](https://pypi.org/project/jsonschema/) (Python) |
 |---------|----:|-----:|---:|----:|-------:|
-| helm-chart-lock | **9 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
-| dependabot | **17 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
-| geojson | **42 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
-| openapi | **345 ms** | 7,454 ms | 4,219 ms | 262 ms | 345,985 ms |
-| tsconfig | **43 ms** | 89 ms | 367 ms | — | 4,475 ms |
-| github-workflow | 66 ms | **56 ms** | 1,259 ms | 300 ms | 21,693 ms |
-| package-json | **41 ms** | — | — | — | 3,163 ms |
-| cspell | **76 ms** | — | — | 244 ms | 5,468 ms |
+| helm-chart-lock | **6 ms** | 13 ms | 293 ms | 53 ms | 2,348 ms |
+| dependabot | **13 ms** | 27 ms | 262 ms | 26 ms | 2,500 ms |
+| geojson | **37 ms** | 53 ms | 2,035 ms | 1,262 ms | 28,490 ms |
+| openapi | **340 ms** | 7,454 ms | 4,219 ms | 262 ms | 345,985 ms |
+| tsconfig | **5 ms** | 89 ms | 367 ms | — | 4,475 ms |
+| github-workflow | **26 ms** | 56 ms | 1,259 ms | 300 ms | 21,693 ms |
+| package-json | **34 ms** | — | — | — | 3,163 ms |
+| cspell | **21 ms** | — | — | 244 ms | 5,468 ms |
 
 **Cold mode** — per-instance median of schema compilation + single validation (550 cycles, Docker-isolated):
 
@@ -46,8 +46,8 @@ A [JSON Schema](https://json-schema.org/) validator for Zig — **100% spec-comp
 
 </details>
 
-- **Full specification coverage**: Draft 7 (920/920 tests) and Draft 2020-12 (1142/1142 tests) with 100% pass rate against the official [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
-- **Minimal dependencies**: Pure Zig with `std` only — links libc for POSIX regex fallback (used for patterns the built-in FastRegex engine doesn't cover)
+- **Full specification coverage**: Draft 7 (920/920 tests) and Draft 2020-12 (1275/1275 tests) with 100% pass rate against the official [JSON Schema Test Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
+- **ECMA-262 regex support**: Three-tier regex engine — FastRegex (custom bytecode, fastest), POSIX ERE (cached), and [QuickJS libregexp](https://bellard.org/quickjs/) (ECMA-262 compliant, handles lookahead)
 - **Compiled schema mode**: Pre-compile schemas once, validate many times with pre-linked sub-schema dispatch and zero-allocation fast paths
 - **Detailed error reporting**: JSON Pointer paths to both the failing instance location and the schema keyword that rejected it
 
