@@ -4,7 +4,9 @@ const jsonschema = @import("main.zig");
 const Validator = @import("validator.zig");
 const SchemaRegistry = jsonschema.SchemaRegistry;
 pub const c = @cImport(@cInclude("regex.h"));
+const lre = @cImport(@cInclude("libregexp.h"));
 const FastRegex = @import("fast_regex.zig").FastRegex;
+const EcmaRegex = @import("ecma_regex.zig").EcmaRegex;
 
 /// Allocate a regex_t using C malloc (required on Linux where regex_t is opaque).
 /// We allocate a generous 256 bytes which covers all known regex_t implementations.
@@ -178,11 +180,14 @@ pub const CompiledSchema = struct {
     }
 
     pub fn deinit(self: *CompiledSchema) void {
-        // Free cached POSIX regex_t allocations
+        // Free cached regex allocations
         for (self.compiled_regexes) |cr| {
             if (cr.cached_regex) |regex| {
                 c.regfree(regex);
                 cFreeRegex(regex);
+            }
+            if (cr.ecma) |*ecma| {
+                @constCast(ecma).deinit();
             }
         }
         self.arena.deinit();
@@ -399,12 +404,14 @@ pub const CharBitmap = struct {
 
 pub const CharClassMode = enum { first_char, all_chars, all_chars_optional };
 
-/// A pre-compiled POSIX regex stored in the arena.
+/// A pre-compiled regex stored in the arena.
 pub const CompiledRegex = struct {
-    /// Raw pattern string for POSIX regex fallback (compiled on-demand at validation time)
+    /// Raw pattern string for regex fallback
     pattern_z: ?[*:0]const u8 = null,
-    /// Cached compiled POSIX regex (heap-allocated via C malloc, compiled on first use)
+    /// Cached compiled POSIX regex (heap-allocated via C malloc)
     cached_regex: ?*c.regex_t = null,
+    /// ECMA-262 regex via QuickJS libregexp (handles lookahead etc.)
+    ecma: ?EcmaRegex = null,
     valid: bool,
     /// Fast bytecode-compiled regex (11x faster than POSIX, handles \d \w \s)
     fast: ?FastRegex = null,
@@ -463,6 +470,8 @@ pub const CompiledRegex = struct {
                 return c.regexec(regex, str_z.ptr, 0, null, 0) == 0;
             }
         }
+        // ECMA-262 fallback (handles lookahead etc.)
+        if (self.ecma) |*ecma| return ecma.matches(str);
         return false;
     }
 };
@@ -1323,11 +1332,12 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
             buf[instance_str.len] = 0;
             return c.regexec(regex, &buf, 0, null, 0) == 0;
         }
-        // Long strings: use allocator for null-terminated copy
         const str_z = alloc.dupeZ(u8, instance_str) catch return null;
         defer alloc.free(str_z);
         return c.regexec(regex, str_z.ptr, 0, null, 0) == 0;
     }
+    // ECMA-262 fallback (handles lookahead etc.)
+    if (cr.ecma) |*ecma| return ecma.matches(instance_str);
     return null;
 }
 
@@ -3093,6 +3103,7 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
     };
     const cr = alloc.create(CompiledRegex) catch return null;
     cr.cached_regex = null;
+    cr.ecma = null;
     cr.simple_prefix = detectSimplePrefix(pattern_str) orelse detectEscapedPrefix(alloc, pattern_str);
     cr.is_identifier = isIdentifierPattern(pattern_str);
     cr.char_class = null;
@@ -3146,6 +3157,11 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
         cr.valid = false;
     }
     cr.fast = FastRegex.compile(pattern_str, alloc);
+    // If neither POSIX nor FastRegex can handle this pattern, try ECMA-262 engine
+    if (!cr.valid and cr.fast == null) {
+        cr.ecma = EcmaRegex.compile(pattern_str, alloc);
+        if (cr.ecma != null) cr.valid = true;
+    }
     regex_list.append(cr) catch {};
     return cr;
 }
@@ -3546,6 +3562,7 @@ fn compilePatternProperties(
         const pattern_z = alloc.dupeZ(u8, posix_pat) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
         cr.cached_regex = null;
+    cr.ecma = null;
         cr.pattern_z = pattern_z.ptr;
         cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
         cr.is_identifier = isIdentifierPattern(pattern);
@@ -3821,6 +3838,7 @@ fn collectStaticCeiling(
                 const pattern_z = alloc.dupeZ(u8, posix_pat2) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
                 cr.cached_regex = null;
+    cr.ecma = null;
                 cr.pattern_z = pattern_z.ptr;
                 cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
                 cr.is_identifier = isIdentifierPattern(pattern);

@@ -12,6 +12,18 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // QuickJS libregexp (ECMA-262 regex engine)
+    lib_mod.addCSourceFiles(.{
+        .files = &.{
+            "src/libregexp/libregexp.c",
+            "src/libregexp/libunicode.c",
+            "src/libregexp/cutils.c",
+            "src/libregexp/lre_shim.c",
+        },
+        .flags = &.{ "-std=c11", "-DCONFIG_VERSION=\"jsonschema.zig\"" },
+    });
+    lib_mod.addIncludePath(b.path("src/libregexp"));
+
     // Library artifact (static)
     const lib = b.addStaticLibrary(.{
         .name = "jsonschema",
@@ -37,6 +49,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    lib_test.root_module.addCSourceFiles(.{
+        .files = &.{
+            "src/libregexp/libregexp.c",
+            "src/libregexp/libunicode.c",
+            "src/libregexp/cutils.c",
+            "src/libregexp/lre_shim.c",
+        },
+        .flags = &.{ "-std=c11", "-DCONFIG_VERSION=\"jsonschema.zig\"" },
+    });
+    lib_test.root_module.addIncludePath(b.path("src/libregexp"));
 
     // JSON Schema Test Suite (lazy dependency — only fetched for tests)
     if (b.lazyDependency("json_schema_test_suite", .{})) |test_suite_dep| {
