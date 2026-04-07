@@ -2,8 +2,8 @@ const std = @import("std");
 const validator = @import("../validator.zig");
 const Context = validator.Context;
 const JsonPointer = @import("../json_pointer.zig");
-const c = @cImport(@cInclude("regex.h"));
 const compiled_mod = @import("../compiled.zig");
+const EcmaRegex = @import("../ecma_regex.zig").EcmaRegex;
 
 pub fn validate(ctx: Context) void {
     const value = ctx.current_keyword_value orelse ctx.schema.object.get("patternProperties") orelse return;
@@ -26,25 +26,15 @@ pub fn validate(ctx: Context) void {
         // Pre-lookup compiled node once per pattern's sub_schema
         const sub_node: ?*const compiled_mod.CompiledNode = if (ctx.compiled) |comp| comp.getNode(sub_schema) else null;
 
-        // Convert ECMA-262 shortcuts and null-terminate for POSIX regex
-        const posix_pat = compiled_mod.convertEcmaToPostfix(ctx.allocator, pattern) catch pattern;
-        const pattern_z = ctx.allocator.dupeZ(u8, posix_pat) catch continue;
-
-        const regex: *c.regex_t = @ptrCast(@alignCast(std.c.malloc(256) orelse continue));
-        defer std.c.free(@ptrCast(regex));
-        const comp_result = c.regcomp(regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-        if (comp_result != 0) continue;
-        defer c.regfree(regex);
+        var ecma = EcmaRegex.compile(pattern, ctx.allocator) orelse continue;
+        defer ecma.deinit();
 
         var instance_it = instance_obj.iterator();
         while (instance_it.next()) |instance_entry| {
             const prop_name = instance_entry.key_ptr.*;
             const prop_value = instance_entry.value_ptr.*;
 
-            // Null-terminate the property name for POSIX regex
-            const prop_name_z = ctx.allocator.dupeZ(u8, prop_name) catch continue;
-
-            if (c.regexec(regex, prop_name_z.ptr, 0, null, 0) == 0) {
+            if (ecma.matches(prop_name)) {
                 // Track evaluated property for unevaluatedProperties
                 if (ctx.evaluated_props) |ep| {
                     ep.put(prop_name, {}) catch {};
@@ -78,21 +68,13 @@ pub fn validate(ctx: Context) void {
 /// Check if a property name matches any pattern in patternProperties.
 /// Used by additional_properties to determine which properties are "covered".
 pub fn matchesAnyPattern(allocator: std.mem.Allocator, prop_name: []const u8, pattern_props: std.json.ObjectMap) bool {
-    const prop_name_z = allocator.dupeZ(u8, prop_name) catch return false;
-
     var it = pattern_props.iterator();
     while (it.next()) |entry| {
         const pattern = entry.key_ptr.*;
-        const posix_pat2 = compiled_mod.convertEcmaToPostfix(allocator, pattern) catch pattern;
-        const pattern_z = allocator.dupeZ(u8, posix_pat2) catch continue;
+        var ecma = EcmaRegex.compile(pattern, allocator) orelse continue;
+        defer ecma.deinit();
 
-        const regex: *c.regex_t = @ptrCast(@alignCast(std.c.malloc(256) orelse continue));
-        defer std.c.free(@ptrCast(regex));
-        const comp_result = c.regcomp(regex, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-        if (comp_result != 0) continue;
-        defer c.regfree(regex);
-
-        if (c.regexec(regex, prop_name_z.ptr, 0, null, 0) == 0) {
+        if (ecma.matches(prop_name)) {
             return true;
         }
     }

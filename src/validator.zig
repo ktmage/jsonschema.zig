@@ -1420,18 +1420,8 @@ pub fn validateAll(ctx: Context) void {
                             else => continue,
                         };
                         if (!cr.valid) continue;
-                        // On-demand POSIX regex compilation from stored pattern
-                        if (cr.pattern_z) |pat_z| {
-                            const regex: *compiled_mod.c.regex_t = @ptrCast(@alignCast(std.c.malloc(256) orelse continue));
-                            defer std.c.free(@ptrCast(regex));
-                            if (compiled_mod.c.regcomp(regex, pat_z, compiled_mod.c.REG_EXTENDED | compiled_mod.c.REG_NOSUB) == 0) {
-                                defer compiled_mod.c.regfree(regex);
-                                const instance_z = ctx.allocator.dupeZ(u8, instance_str) catch continue;
-                                defer ctx.allocator.free(instance_z);
-                                if (compiled_mod.c.regexec(regex, instance_z.ptr, 0, null, 0) != 0) {
-                                    ctx.addError("pattern", "String does not match pattern");
-                                }
-                            }
+                        if (!cr.matches(instance_str, ctx.allocator)) {
+                            ctx.addError("pattern", "String does not match pattern");
                         }
                     },
                     .dependent_required_compiled => {

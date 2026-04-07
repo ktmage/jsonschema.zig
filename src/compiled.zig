@@ -3,24 +3,8 @@ const Allocator = std.mem.Allocator;
 const jsonschema = @import("main.zig");
 const Validator = @import("validator.zig");
 const SchemaRegistry = jsonschema.SchemaRegistry;
-pub const c = @cImport(@cInclude("regex.h"));
-const lre = @cImport(@cInclude("libregexp.h"));
 const FastRegex = @import("fast_regex.zig").FastRegex;
 const EcmaRegex = @import("ecma_regex.zig").EcmaRegex;
-
-/// Allocate a regex_t using C malloc (required on Linux where regex_t is opaque).
-/// We allocate a generous 256 bytes which covers all known regex_t implementations.
-const REGEX_T_SIZE = 256;
-
-fn cMallocRegex() ?*c.regex_t {
-    const ptr = std.c.malloc(REGEX_T_SIZE);
-    if (ptr) |p| return @ptrCast(@alignCast(p));
-    return null;
-}
-
-fn cFreeRegex(ptr: *c.regex_t) void {
-    std.c.free(@ptrCast(ptr));
-}
 
 /// A pre-compiled schema that accelerates repeated validation.
 ///
@@ -182,10 +166,6 @@ pub const CompiledSchema = struct {
     pub fn deinit(self: *CompiledSchema) void {
         // Free cached regex allocations
         for (self.compiled_regexes) |cr| {
-            if (cr.cached_regex) |regex| {
-                c.regfree(regex);
-                cFreeRegex(regex);
-            }
             if (cr.ecma) |*ecma| {
                 @constCast(ecma).deinit();
             }
@@ -406,10 +386,6 @@ pub const CharClassMode = enum { first_char, all_chars, all_chars_optional };
 
 /// A pre-compiled regex stored in the arena.
 pub const CompiledRegex = struct {
-    /// Raw pattern string for regex fallback
-    pattern_z: ?[*:0]const u8 = null,
-    /// Cached compiled POSIX regex (heap-allocated via C malloc)
-    cached_regex: ?*c.regex_t = null,
     /// ECMA-262 regex via QuickJS libregexp (handles lookahead etc.)
     ecma: ?EcmaRegex = null,
     valid: bool,
@@ -457,20 +433,8 @@ pub const CompiledRegex = struct {
         if (self.char_class) |bm| return matchesCharClass(str, bm, self.char_class_mode);
         // Fast bytecode regex (no allocation, 11x faster than POSIX)
         if (self.fast) |*fast| return fast.matches(str);
-        // POSIX fallback: use pre-compiled cached regex
-        if (self.cached_regex) |regex| {
-            if (str.len < 512) {
-                var buf: [512]u8 = undefined;
-                @memcpy(buf[0..str.len], str);
-                buf[str.len] = 0;
-                return c.regexec(regex, &buf, 0, null, 0) == 0;
-            }
-            if (allocator) |alloc| {
-                const str_z = alloc.dupeZ(u8, str) catch return false;
-                return c.regexec(regex, str_z.ptr, 0, null, 0) == 0;
-            }
-        }
-        // ECMA-262 fallback (handles lookahead etc.)
+        _ = allocator;
+        // ECMA-262 fallback
         if (self.ecma) |*ecma| return ecma.matches(str);
         return false;
     }
@@ -1324,19 +1288,8 @@ fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json
     if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
     if (cr.fast) |*fast| return fast.matches(instance_str);
     if (!cr.valid) return null; // regex compile failed, can't validate in fast path
-    // POSIX fallback: use pre-compiled cached regex
-    if (cr.cached_regex) |regex| {
-        if (instance_str.len < 512) {
-            var buf: [512]u8 = undefined;
-            @memcpy(buf[0..instance_str.len], instance_str);
-            buf[instance_str.len] = 0;
-            return c.regexec(regex, &buf, 0, null, 0) == 0;
-        }
-        const str_z = alloc.dupeZ(u8, instance_str) catch return null;
-        defer alloc.free(str_z);
-        return c.regexec(regex, str_z.ptr, 0, null, 0) == 0;
-    }
-    // ECMA-262 fallback (handles lookahead etc.)
+    _ = alloc;
+    // ECMA-262 fallback
     if (cr.ecma) |*ecma| return ecma.matches(instance_str);
     return null;
 }
@@ -2994,144 +2947,12 @@ fn extractPropertyNames(alloc: Allocator, obj: std.json.ObjectMap) []const []con
     return names.toOwnedSlice() catch &.{};
 }
 
-/// Compile a POSIX regex pattern string. Returns null if not a string or compilation fails.
-/// Convert ECMA-262 regex shortcuts to POSIX ERE equivalents.
-/// \d → [0-9], \D → [^0-9], \w → [a-zA-Z0-9_], \W → [^a-zA-Z0-9_], \s → [ \t\n\r], \S → [^ \t\n\r]
-/// Fix character class dashes for POSIX ERE compatibility.
-fn fixCharClassDashes(alloc: Allocator, pattern: []const u8) ?[]const u8 {
-    if (std.mem.indexOfScalar(u8, pattern, '[') == null) return null;
-    var buf = std.ArrayList(u8).init(alloc);
-    var i: usize = 0;
-    var modified = false;
-    while (i < pattern.len) {
-        if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            buf.append(pattern[i]) catch return null;
-            buf.append(pattern[i + 1]) catch return null;
-            i += 2;
-            continue;
-        }
-        if (pattern[i] != '[') {
-            buf.append(pattern[i]) catch return null;
-            i += 1;
-            continue;
-        }
-        buf.append('[') catch return null;
-        i += 1;
-        if (i < pattern.len and pattern[i] == '^') {
-            buf.append('^') catch return null;
-            i += 1;
-        }
-        if (i < pattern.len and pattern[i] == ']') {
-            buf.append(']') catch return null;
-            i += 1;
-        }
-        var extra_dash = false;
-        while (i < pattern.len and pattern[i] != ']') {
-            if (pattern[i] == '\\' and i + 1 < pattern.len) {
-                buf.append(pattern[i]) catch return null;
-                buf.append(pattern[i + 1]) catch return null;
-                i += 2;
-                continue;
-            }
-            if (pattern[i] == '-') {
-                const has_prev = buf.items.len > 0 and buf.items[buf.items.len - 1] != '[' and buf.items[buf.items.len - 1] != '^';
-                const has_next = i + 1 < pattern.len and pattern[i + 1] != ']';
-                if (has_prev and has_next) {
-                    const prev_ch = buf.items[buf.items.len - 1];
-                    const next_ch = pattern[i + 1];
-                    const is_std_range = (prev_ch >= 'a' and prev_ch <= 'z' and next_ch >= 'a' and next_ch <= 'z') or
-                        (prev_ch >= 'A' and prev_ch <= 'Z' and next_ch >= 'A' and next_ch <= 'Z') or
-                        (prev_ch >= '0' and prev_ch <= '9' and next_ch >= '0' and next_ch <= '9');
-                    if (is_std_range and next_ch >= prev_ch) {
-                        buf.append('-') catch return null;
-                        i += 1;
-                        continue;
-                    }
-                    extra_dash = true;
-                    modified = true;
-                    i += 1;
-                    continue;
-                }
-                buf.append('-') catch return null;
-                i += 1;
-                continue;
-            }
-            buf.append(pattern[i]) catch return null;
-            i += 1;
-        }
-        if (extra_dash) buf.append('-') catch return null;
-        if (i < pattern.len) {
-            buf.append(']') catch return null;
-            i += 1;
-        }
-    }
-    if (!modified) return null;
-    return buf.toOwnedSlice() catch null;
-}
-
-pub fn convertEcmaToPostfix(alloc: Allocator, pattern: []const u8) ![]const u8 {
-    // Quick check: does the pattern contain any ECMA-specific features?
-    var needs_conversion = false;
-    for (0..pattern.len) |i| {
-        if (i + 1 < pattern.len and pattern[i] == '\\') {
-            switch (pattern[i + 1]) {
-                'd', 'D', 'w', 'W', 's', 'S' => {
-                    needs_conversion = true;
-                    break;
-                },
-                else => {},
-            }
-        }
-        // (?:...) non-capturing group — POSIX ERE doesn't support (?:)
-        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and pattern[i + 2] == ':') {
-            needs_conversion = true;
-            break;
-        }
-    }
-    if (!needs_conversion) return pattern;
-
-    var buf = std.ArrayList(u8).init(alloc);
-    var i: usize = 0;
-    while (i < pattern.len) {
-        // Convert (?:...) to (...)
-        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and pattern[i + 2] == ':') {
-            try buf.append('(');
-            i += 3;
-            continue;
-        }
-        if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            const replacement: ?[]const u8 = switch (pattern[i + 1]) {
-                'd' => "[0-9]",
-                'D' => "[^0-9]",
-                'w' => "[a-zA-Z0-9_]",
-                'W' => "[^a-zA-Z0-9_]",
-                's' => "[ \\t\\n\\r]",
-                'S' => "[^ \\t\\n\\r]",
-                else => null,
-            };
-            if (replacement) |r| {
-                try buf.appendSlice(r);
-                i += 2;
-            } else {
-                try buf.append(pattern[i]);
-                try buf.append(pattern[i + 1]);
-                i += 2;
-            }
-        } else {
-            try buf.append(pattern[i]);
-            i += 1;
-        }
-    }
-    return buf.toOwnedSlice();
-}
-
 fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.ArrayList(*CompiledRegex)) ?*CompiledRegex {
     const pattern_str = switch (pattern_val) {
         .string => |s| s,
         else => return null,
     };
     const cr = alloc.create(CompiledRegex) catch return null;
-    cr.cached_regex = null;
     cr.ecma = null;
     cr.simple_prefix = detectSimplePrefix(pattern_str) orelse detectEscapedPrefix(alloc, pattern_str);
     cr.is_identifier = isIdentifierPattern(pattern_str);
@@ -3151,46 +2972,12 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
             cr.ci_literal = ci;
         }
     }
-    // Convert ECMA-262 shortcuts (\d, \w, \s) to POSIX ERE equivalents
-    const posix_pattern = convertEcmaToPostfix(alloc, pattern_str) catch pattern_str;
-    const pattern_z = alloc.dupeZ(u8, posix_pattern) catch return null;
-    // Compile and cache the POSIX regex at compile time (avoids per-match regcomp)
-    cr.pattern_z = pattern_z.ptr;
-    if (cMallocRegex()) |rp| {
-        if (c.regcomp(rp, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
-            cr.cached_regex = rp;
-            cr.valid = true;
-        } else {
-            // Retry: fix character class dashes for POSIX compatibility
-            const fixed = fixCharClassDashes(alloc, posix_pattern);
-            if (fixed) |fp| {
-                if (alloc.dupeZ(u8, fp)) |fz| {
-                    cr.pattern_z = fz.ptr;
-                    if (c.regcomp(rp, fz.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
-                        cr.cached_regex = rp;
-                        cr.valid = true;
-                    } else {
-                        cFreeRegex(rp);
-                        cr.valid = false;
-                    }
-                } else |_| {
-                    cFreeRegex(rp);
-                    cr.valid = false;
-                }
-            } else {
-                cFreeRegex(rp);
-                cr.valid = false;
-            }
-        }
-    } else {
-        cr.valid = false;
-    }
     cr.fast = FastRegex.compile(pattern_str, alloc);
-    // If neither POSIX nor FastRegex can handle this pattern, try ECMA-262 engine
-    if (!cr.valid and cr.fast == null) {
+    // If FastRegex can't handle this pattern, use ECMA-262 engine
+    if (cr.fast == null) {
         cr.ecma = EcmaRegex.compile(pattern_str, alloc);
-        if (cr.ecma != null) cr.valid = true;
     }
+    cr.valid = cr.fast != null or cr.ecma != null;
     regex_list.append(cr) catch {};
     return cr;
 }
@@ -3587,12 +3374,8 @@ fn compilePatternProperties(
     while (it.next()) |entry| {
         const pattern = entry.key_ptr.*;
         const sub_schema = entry.value_ptr.*;
-        const posix_pat = convertEcmaToPostfix(alloc, pattern) catch pattern;
-        const pattern_z = alloc.dupeZ(u8, posix_pat) catch continue;
         const cr = alloc.create(CompiledRegex) catch continue;
-        cr.cached_regex = null;
         cr.ecma = null;
-        cr.pattern_z = pattern_z.ptr;
         cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
         cr.is_identifier = isIdentifierPattern(pattern);
         cr.char_class = null;
@@ -3609,18 +3392,11 @@ fn compilePatternProperties(
                 cr.ci_literal = ci;
             }
         }
-        if (cMallocRegex()) |rp2| {
-            if (c.regcomp(rp2, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
-                cr.cached_regex = rp2;
-                cr.valid = true;
-            } else {
-                cFreeRegex(rp2);
-                cr.valid = false;
-            }
-        } else {
-            cr.valid = false;
-        }
         cr.fast = FastRegex.compile(pattern, alloc);
+        if (cr.fast == null) {
+            cr.ecma = EcmaRegex.compile(pattern, alloc);
+        }
+        cr.valid = cr.fast != null or cr.ecma != null;
         regex_list.append(cr) catch {};
         entries.append(.{
             .regex = cr,
@@ -3863,12 +3639,8 @@ fn collectStaticCeiling(
             var pp_it = pp.object.iterator();
             while (pp_it.next()) |entry| {
                 const pattern = entry.key_ptr.*;
-                const posix_pat2 = convertEcmaToPostfix(alloc, pattern) catch pattern;
-                const pattern_z = alloc.dupeZ(u8, posix_pat2) catch continue;
                 const cr = alloc.create(CompiledRegex) catch continue;
-                cr.cached_regex = null;
                 cr.ecma = null;
-                cr.pattern_z = pattern_z.ptr;
                 cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
                 cr.is_identifier = isIdentifierPattern(pattern);
                 cr.char_class = null;
@@ -3883,18 +3655,11 @@ fn collectStaticCeiling(
                         cr.literal_set = lset;
                     }
                 }
-                if (cMallocRegex()) |rp3| {
-                    if (c.regcomp(rp3, pattern_z.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
-                        cr.cached_regex = rp3;
-                        cr.valid = true;
-                    } else {
-                        cFreeRegex(rp3);
-                        cr.valid = false;
-                    }
-                } else {
-                    cr.valid = false;
-                }
                 cr.fast = FastRegex.compile(pattern, alloc);
+                if (cr.fast == null) {
+                    cr.ecma = EcmaRegex.compile(pattern, alloc);
+                }
+                cr.valid = cr.fast != null or cr.ecma != null;
                 regex_list.append(cr) catch {};
                 if (cr.valid or cr.simple_prefix != null or cr.is_identifier or cr.char_class != null or cr.literal_set != null) {
                     pattern_regexes.append(cr) catch {};

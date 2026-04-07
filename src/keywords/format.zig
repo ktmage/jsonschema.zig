@@ -288,23 +288,13 @@ fn isRelativeJsonPointer(s: []const u8) bool {
 }
 
 fn isRegex(s: []const u8) bool {
-    // Check if s is a valid ECMA-262 regex by attempting POSIX ERE compilation.
-    // Convert ECMA shortcuts first, then try to compile.
-    const c = @import("../compiled.zig").c;
-    const compiled_mod = @import("../compiled.zig");
-    // Use a stack allocator for the conversion
+    // Check if s is a valid ECMA-262 regex by attempting compilation.
+    const EcmaRegex = @import("../ecma_regex.zig").EcmaRegex;
     var buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const posix_pat = compiled_mod.convertEcmaToPostfix(fba.allocator(), s) catch s;
-    const pat_z = fba.allocator().dupeZ(u8, posix_pat) catch return true; // can't check, assume valid
-    const regex: *c.regex_t = @ptrCast(@alignCast(std.c.malloc(256) orelse return true));
-    defer std.c.free(@ptrCast(regex));
-    const result = c.regcomp(regex, pat_z.ptr, c.REG_EXTENDED | c.REG_NOSUB);
-    if (result == 0) {
-        c.regfree(regex);
-        return true;
-    }
-    return false;
+    var ecma = EcmaRegex.compile(s, fba.allocator()) orelse return false;
+    ecma.deinit();
+    return true;
 }
 
 fn isUuid(s: []const u8) bool {
