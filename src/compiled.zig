@@ -3,7 +3,6 @@ const Allocator = std.mem.Allocator;
 const jsonschema = @import("main.zig");
 const Validator = @import("validator.zig");
 const SchemaRegistry = jsonschema.SchemaRegistry;
-const FastRegex = @import("fast_regex.zig").FastRegex;
 const EcmaRegex = @import("ecma_regex.zig").EcmaRegex;
 
 /// A pre-compiled schema that accelerates repeated validation.
@@ -370,71 +369,16 @@ pub const GenericValidator = struct {
     keyword_name: []const u8,
 };
 
-/// 128-bit bitmap for fast ASCII character class matching.
-pub const CharBitmap = struct {
-    low: u64,
-    high: u64,
-
-    pub fn contains(self: CharBitmap, ch: u8) bool {
-        if (ch >= 128) return false;
-        if (ch < 64) return (self.low >> @as(u6, @intCast(ch))) & 1 != 0;
-        return (self.high >> @as(u6, @intCast(ch - 64))) & 1 != 0;
-    }
-};
-
-pub const CharClassMode = enum { first_char, all_chars, all_chars_optional };
-
 /// A pre-compiled regex stored in the arena.
 pub const CompiledRegex = struct {
     /// ECMA-262 regex via QuickJS libregexp (handles lookahead etc.)
     ecma: ?EcmaRegex = null,
     valid: bool,
-    /// Fast bytecode-compiled regex (11x faster than POSIX, handles \d \w \s)
-    fast: ?FastRegex = null,
-    /// Simple prefix string for fast matching (e.g., "^x-" → prefix = "x-")
-    simple_prefix: ?[]const u8 = null,
-    /// True if this is a ^[_a-zA-Z][a-zA-Z0-9_-]*$ identifier pattern
-    is_identifier: bool = false,
-    /// Fast bitmap-based character class pattern
-    char_class: ?CharBitmap = null,
-    char_class_mode: CharClassMode = .first_char,
-    /// Literal string set for patterns like ^(foo|bar)$ (max 8 alternatives)
-    literal_set: ?[]const []const u8 = null,
-    /// Case-insensitive lowercase literal for patterns like ^[Cc][Oo][Mm]...$
-    ci_literal: ?[]const u8 = null,
 
     /// Check if a string matches this compiled pattern.
     pub fn matches(self: *const CompiledRegex, str: []const u8, allocator: ?std.mem.Allocator) bool {
-        // Fast path: simple prefix match
-        if (self.simple_prefix) |prefix| {
-            return str.len >= prefix.len and std.mem.eql(u8, str[0..prefix.len], prefix);
-        }
-        // Fast path: identifier pattern
-        if (self.is_identifier) return matchesIdentifierPattern(str);
-        // Regex path: need null-terminated string
-        if (!self.valid) return false;
-        // Fast path: literal string set (case-insensitive, lowercase stored)
-        if (self.literal_set) |lset| {
-            for (lset) |lit| {
-                if (str.len == lit.len and std.mem.eql(u8, str, lit)) return true;
-            }
-            return false;
-        }
-        // Fast path: case-insensitive literal (e.g., ^[Cc][Oo][Mm]...$)
-        if (self.ci_literal) |lit| {
-            if (str.len != lit.len) return false;
-            for (str, lit) |a, b| {
-                const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
-                if (al != b) return false;
-            }
-            return true;
-        }
-        // Fast path: character class bitmap
-        if (self.char_class) |bm| return matchesCharClass(str, bm, self.char_class_mode);
-        // Fast bytecode regex (no allocation, 11x faster than POSIX)
-        if (self.fast) |*fast| return fast.matches(str);
         _ = allocator;
-        // ECMA-262 fallback
+        if (!self.valid) return false;
         if (self.ecma) |*ecma| return ecma.matches(str);
         return false;
     }
@@ -1252,7 +1196,7 @@ fn isValid_unevaluated_properties_compiled(data: *allowzero const anyopaque, ins
                     found = true;
                     break;
                 }
-                if (cr.simple_prefix == null and !cr.is_identifier and !cr.valid) return null;
+                if (!cr.valid) return null;
             }
         }
         if (!found) return null;
@@ -1260,36 +1204,13 @@ fn isValid_unevaluated_properties_compiled(data: *allowzero const anyopaque, ins
     return true;
 }
 
-fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, alloc: Allocator) ?bool {
+fn isValid_pattern_compiled(data: *allowzero const anyopaque, instance: std.json.Value, _: *const CompiledSchema, _: Allocator) ?bool {
     const cr: *const CompiledRegex = @ptrCast(@alignCast(data));
     const instance_str = switch (instance) {
         .string => |s| s,
         else => return true,
     };
-    if (cr.simple_prefix) |prefix| {
-        return instance_str.len >= prefix.len and std.mem.eql(u8, instance_str[0..prefix.len], prefix);
-    }
-    if (cr.is_identifier) return matchesIdentifierPattern(instance_str);
-    // Fast path: literal string set
-    if (cr.literal_set) |lset| {
-        for (lset) |lit| {
-            if (instance_str.len == lit.len and std.mem.eql(u8, instance_str, lit)) return true;
-        }
-        return false;
-    }
-    if (cr.ci_literal) |lit| {
-        if (instance_str.len != lit.len) return false;
-        for (instance_str, lit) |a, b| {
-            const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
-            if (al != b) return false;
-        }
-        return true;
-    }
-    if (cr.char_class) |bm| return matchesCharClass(instance_str, bm, cr.char_class_mode);
-    if (cr.fast) |*fast| return fast.matches(instance_str);
     if (!cr.valid) return null; // regex compile failed, can't validate in fast path
-    _ = alloc;
-    // ECMA-262 fallback
     if (cr.ecma) |*ecma| return ecma.matches(instance_str);
     return null;
 }
@@ -1393,9 +1314,7 @@ fn isValid_pattern_properties_compiled(data: *allowzero const anyopaque, instanc
     };
     // Check all patterns have at least some matching capability
     for (pp_entries) |pp_entry| {
-        if (pp_entry.regex.simple_prefix == null and !pp_entry.regex.is_identifier and
-            pp_entry.regex.char_class == null and pp_entry.regex.literal_set == null and
-            pp_entry.regex.ci_literal == null and !pp_entry.regex.valid) return null;
+        if (!pp_entry.regex.valid) return null;
     }
     const keys = obj.keys();
     const vals = obj.values();
@@ -1635,7 +1554,7 @@ fn isNodeFullyInlinable(node: *const CompiledNode) bool {
             .pattern_properties_compiled => {
                 const w: *const CompiledValidator.PatternPropertySliceWrapper = v.getData(*const CompiledValidator.PatternPropertySliceWrapper);
                 for (w.items) |entry| {
-                    if (entry.regex.simple_prefix == null and !entry.regex.is_identifier and entry.regex.char_class == null and entry.regex.literal_set == null) return false;
+                    if (!entry.regex.valid) return false;
                 }
             },
             else => {},
@@ -2953,409 +2872,10 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
         else => return null,
     };
     const cr = alloc.create(CompiledRegex) catch return null;
-    cr.ecma = null;
-    cr.simple_prefix = detectSimplePrefix(pattern_str) orelse detectEscapedPrefix(alloc, pattern_str);
-    cr.is_identifier = isIdentifierPattern(pattern_str);
-    cr.char_class = null;
-    cr.char_class_mode = .first_char;
-    cr.literal_set = null;
-    cr.ci_literal = null;
-    if (cr.simple_prefix == null and !cr.is_identifier) {
-        if (detectCharClass(pattern_str)) |cc| {
-            cr.char_class = cc.bitmap;
-            cr.char_class_mode = cc.mode;
-        } else if (expandRegexToLiterals(alloc, pattern_str)) |lset| {
-            cr.literal_set = lset;
-        } else if (detectLiteralSet(alloc, pattern_str)) |lset| {
-            cr.literal_set = lset;
-        } else if (detectCILiteral(alloc, pattern_str)) |ci| {
-            cr.ci_literal = ci;
-        }
-    }
-    cr.fast = FastRegex.compile(pattern_str, alloc);
-    // If FastRegex can't handle this pattern, use ECMA-262 engine
-    if (cr.fast == null) {
-        cr.ecma = EcmaRegex.compile(pattern_str, alloc);
-    }
-    cr.valid = cr.fast != null or cr.ecma != null;
+    cr.ecma = EcmaRegex.compile(pattern_str, alloc);
+    cr.valid = cr.ecma != null;
     regex_list.append(cr) catch {};
     return cr;
-}
-
-/// Match a string against a character class bitmap.
-fn matchesCharClass(s: []const u8, bm: CharBitmap, mode: CharClassMode) bool {
-    switch (mode) {
-        .first_char => {
-            if (s.len == 0) return false;
-            return bm.contains(s[0]);
-        },
-        .all_chars => {
-            if (s.len == 0) return false;
-            for (s) |ch| {
-                if (!bm.contains(ch)) return false;
-            }
-            return true;
-        },
-        .all_chars_optional => {
-            for (s) |ch| {
-                if (!bm.contains(ch)) return false;
-            }
-            return true;
-        },
-    }
-}
-
-/// Parse a character class from a regex pattern like ^[a-z_]+$ and return a bitmap.
-/// Detect anchored alternation patterns and expand to literal string set.
-/// Handles: ^(foo|bar)$, ^prefix(a|b)suffix$, ^prefix(a|b)?suffix$
-fn detectLiteralSet(alloc: Allocator, pattern: []const u8) ?[]const []const u8 {
-    if (pattern.len < 5 or pattern[0] != '^' or pattern[pattern.len - 1] != '$') return null;
-    const inner = pattern[1 .. pattern.len - 1];
-
-    // Find ( and )
-    var paren_open: ?usize = null;
-    var paren_close: ?usize = null;
-    for (inner, 0..) |ch, i| {
-        if (ch == '(' and paren_open == null) {
-            paren_open = i;
-        } else if (ch == ')' and paren_open != null and paren_close == null) {
-            paren_close = i;
-        } else if (ch == '(' or ch == ')') return null; // nested/extra parens
-    }
-    const po = paren_open orelse return null;
-    const pc = paren_close orelse return null;
-
-    const prefix = inner[0..po];
-    const group = inner[po + 1 .. pc];
-    const after_close = inner[pc + 1 ..];
-
-    // Check if group is optional (? after close paren)
-    var is_optional = false;
-    var suffix = after_close;
-    if (after_close.len > 0 and after_close[0] == '?') {
-        is_optional = true;
-        suffix = after_close[1..];
-    }
-
-    // Verify prefix and suffix are literal (no metacharacters)
-    for (prefix) |ch| {
-        switch (ch) {
-            '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null,
-            else => {},
-        }
-    }
-    for (suffix) |ch| {
-        switch (ch) {
-            '.', '*', '+', '?', '[', ']', '{', '}', '|', '\\' => return null,
-            else => {},
-        }
-    }
-
-    var alternatives = std.ArrayList([]const u8).init(alloc);
-
-    // Add prefix+suffix (no group) if optional
-    if (is_optional) {
-        alternatives.append(std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, suffix }) catch return null) catch return null;
-    }
-
-    // Split group by | and build each alternative
-    var it = std.mem.splitScalar(u8, group, '|');
-    while (it.next()) |alt| {
-        // Try to parse as literal (possibly with [Xx] CI pairs)
-        const parsed = parseCIAlternative(alloc, alt) orelse return null;
-        alternatives.append(std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ prefix, parsed, suffix }) catch return null) catch return null;
-    }
-
-    if (alternatives.items.len < 2 or alternatives.items.len > 16) return null;
-    return alternatives.toOwnedSlice() catch null;
-}
-
-/// Parse an alternative that may contain [Xx] case-insensitive pairs.
-/// Returns lowercase literal or null if unparseable.
-fn parseCIAlternative(alloc: Allocator, alt: []const u8) ?[]const u8 {
-    var buf = std.ArrayList(u8).init(alloc);
-    var i: usize = 0;
-    while (i < alt.len) {
-        const ch = alt[i];
-        if (ch == '[' and i + 3 < alt.len and alt[i + 3] == ']') {
-            const c1 = alt[i + 1];
-            const c2 = alt[i + 2];
-            if (c1 >= 'A' and c1 <= 'Z' and c2 == c1 + 32) {
-                buf.append(c2) catch return null;
-                i += 4;
-            } else if (c2 >= 'A' and c2 <= 'Z' and c1 == c2 + 32) {
-                buf.append(c1) catch return null;
-                i += 4;
-            } else {
-                return null;
-            }
-        } else {
-            switch (ch) {
-                '.', '*', '+', '?', '(', ')', '{', '}', '\\' => return null,
-                '[', ']' => return null,
-                '|' => return null,
-                else => {
-                    buf.append(ch) catch return null;
-                    i += 1;
-                },
-            }
-        }
-    }
-    if (buf.items.len == 0) return null;
-    return buf.toOwnedSlice() catch null;
-}
-
-fn detectCharClass(pattern: []const u8) ?struct { bitmap: CharBitmap, mode: CharClassMode } {
-    if (pattern.len < 4 or pattern[0] != '^' or pattern[1] != '[') return null;
-
-    var i: usize = 2;
-    if (i < pattern.len and pattern[i] == '^') return null; // negated class not supported
-    var bitmap = CharBitmap{ .low = 0, .high = 0 };
-
-    while (i < pattern.len and pattern[i] != ']') {
-        const ch = pattern[i];
-        if (ch == '\\') return null; // escaped character
-        if (i + 2 < pattern.len and pattern[i + 1] == '-' and pattern[i + 2] != ']') {
-            const start = ch;
-            const end = pattern[i + 2];
-            if (start > end or start >= 128 or end >= 128) return null;
-            var c_val: u8 = start;
-            while (c_val <= end) : (c_val += 1) {
-                if (c_val < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(c_val)) else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(c_val - 64));
-            }
-            i += 3;
-        } else {
-            if (ch >= 128) return null;
-            if (ch < 64) bitmap.low |= @as(u64, 1) << @as(u6, @intCast(ch)) else bitmap.high |= @as(u64, 1) << @as(u6, @intCast(ch - 64));
-            i += 1;
-        }
-    }
-    if (i >= pattern.len or pattern[i] != ']') return null;
-    i += 1;
-
-    // Determine mode from what follows the char class
-    if (i == pattern.len) return .{ .bitmap = bitmap, .mode = .first_char }; // ^[class]
-    if (i + 1 == pattern.len and pattern[i] == '$') return null; // ^[class]$ - single char, complex
-    if (i + 2 == pattern.len and pattern[i + 1] == '$') {
-        if (pattern[i] == '+') return .{ .bitmap = bitmap, .mode = .all_chars };
-        if (pattern[i] == '*') return .{ .bitmap = bitmap, .mode = .all_chars_optional };
-    }
-    return null;
-}
-
-/// Detect if a regex pattern is a simple "^literal" prefix match.
-/// Returns the prefix string if so, null otherwise.
-/// Detect case-insensitive literal patterns like ^[Cc][Oo][Mm][Mm]...$
-/// Returns the lowercase literal if the pattern consists entirely of [Xx] pairs + `$`.
-/// Try to expand a regex pattern into a set of lowercase literal strings.
-/// Handles: [Xx] CI pairs, [abc] char classes, (a|b) alternation, (x)? optional groups.
-/// Returns null if the pattern is too complex.
-fn expandRegexToLiterals(alloc: Allocator, pattern: []const u8) ?[]const []const u8 {
-    if (pattern.len < 3 or pattern[0] != '^' or pattern[pattern.len - 1] != '$') return null;
-    const inner = pattern[1 .. pattern.len - 1];
-    var result = std.ArrayList([]const u8).init(alloc);
-    // Start with one empty string
-    result.append(alloc.dupe(u8, "") catch return null) catch return null;
-    if (!expandInto(alloc, &result, inner, 0)) return null;
-    if (result.items.len < 2 or result.items.len > 64) return null;
-    return result.toOwnedSlice() catch null;
-}
-
-fn expandInto(alloc: Allocator, result: *std.ArrayList([]const u8), pat: []const u8, start: usize) bool {
-    var i = start;
-    while (i < pat.len) {
-        const ch = pat[i];
-        if (ch == '[') {
-            // Character class: [Xx] or [356] or [AaUu]
-            const close = std.mem.indexOfScalarPos(u8, pat, i + 1, ']') orelse return false;
-            const chars = pat[i + 1 .. close];
-            if (chars.len < 1 or chars.len > 10) return false;
-            // Check for CI pair [Xx]
-            if (chars.len == 2 and chars[0] >= 'A' and chars[0] <= 'Z' and chars[1] == chars[0] + 32) {
-                // Append lowercase char to all current strings
-                appendCharToAll(alloc, result, chars[1]) orelse return false;
-            } else if (chars.len == 2 and chars[1] >= 'A' and chars[1] <= 'Z' and chars[0] == chars[1] + 32) {
-                appendCharToAll(alloc, result, chars[0]) orelse return false;
-            } else {
-                // Expand each char as an alternative
-                const current = result.items.len;
-                const originals = alloc.dupe([]const u8, result.items) catch return false;
-                result.clearRetainingCapacity();
-                // Deduplicate lowercase chars
-                var seen_chars: [128]bool = [_]bool{false} ** 128;
-                for (chars) |ch2| {
-                    const lc = if (ch2 >= 'A' and ch2 <= 'Z') ch2 + 32 else ch2;
-                    if (lc < 128 and seen_chars[lc]) continue;
-                    if (lc < 128) seen_chars[lc] = true;
-                    for (originals) |s| {
-                        const new = std.fmt.allocPrint(alloc, "{s}{c}", .{ s, lc }) catch return false;
-                        result.append(new) catch return false;
-                    }
-                }
-                if (result.items.len > 64) return false;
-                _ = current;
-            }
-            i = close + 1;
-        } else if (ch == '(') {
-            // Find matching close paren (handling nesting)
-            var depth: usize = 1;
-            var j = i + 1;
-            while (j < pat.len and depth > 0) : (j += 1) {
-                if (pat[j] == '(') depth += 1 else if (pat[j] == ')') depth -= 1;
-            }
-            if (depth != 0) return false;
-            const group = pat[i + 1 .. j - 1];
-            const is_optional = j < pat.len and pat[j] == '?';
-
-            // Split by top-level |
-            var alts = std.ArrayList([]const u8).init(alloc);
-            var alt_start: usize = 0;
-            var d: usize = 0;
-            for (group, 0..) |gc, gi| {
-                if (gc == '(') d += 1 else if (gc == ')') d -= 1 else if (gc == '|' and d == 0) {
-                    alts.append(group[alt_start..gi]) catch return false;
-                    alt_start = gi + 1;
-                }
-            }
-            alts.append(group[alt_start..]) catch return false;
-
-            const originals = alloc.dupe([]const u8, result.items) catch return false;
-            result.clearRetainingCapacity();
-
-            if (is_optional) {
-                // Add originals unchanged (empty alternative)
-                for (originals) |s| result.append(alloc.dupe(u8, s) catch return false) catch return false;
-            }
-
-            for (alts.items) |alt| {
-                // For each alternative, expand recursively
-                var branch = std.ArrayList([]const u8).init(alloc);
-                for (originals) |s| branch.append(alloc.dupe(u8, s) catch return false) catch return false;
-                if (!expandInto(alloc, &branch, alt, 0)) return false;
-                for (branch.items) |s| result.append(s) catch return false;
-            }
-
-            if (result.items.len > 64) return false;
-            i = if (is_optional) j + 1 else j;
-        } else if (ch == '|' or ch == ')') {
-            return false; // shouldn't reach top-level | or )
-        } else if (ch == '.' or ch == '*' or ch == '+' or ch == '?' or ch == '{' or ch == '}' or ch == '\\') {
-            return false;
-        } else {
-            // Literal character — preserve case (only [Xx] pairs are case-folded)
-            appendCharToAll(alloc, result, ch) orelse return false;
-            i += 1;
-        }
-    }
-    return true;
-}
-
-fn appendCharToAll(alloc: Allocator, list: *std.ArrayList([]const u8), ch: u8) ?void {
-    for (list.items, 0..) |s, idx| {
-        list.items[idx] = std.fmt.allocPrint(alloc, "{s}{c}", .{ s, ch }) catch return null;
-    }
-}
-
-fn detectCILiteral(alloc: Allocator, pattern: []const u8) ?[]const u8 {
-    if (pattern.len < 6 or pattern[0] != '^' or pattern[pattern.len - 1] != '$') return null;
-    var buf = std.ArrayList(u8).init(alloc);
-    var i: usize = 1;
-    while (i < pattern.len - 1) { // -1 to skip $
-        if (pattern[i] == '[' and i + 3 < pattern.len and pattern[i + 3] == ']') {
-            const c1 = pattern[i + 1];
-            const c2 = pattern[i + 2];
-            // Check [Xx] pattern (uppercase then lowercase or vice versa)
-            if (c1 >= 'A' and c1 <= 'Z' and c2 == c1 + 32) {
-                buf.append(c2) catch return null; // store lowercase
-                i += 4;
-            } else if (c2 >= 'A' and c2 <= 'Z' and c1 == c2 + 32) {
-                buf.append(c1) catch return null;
-                i += 4;
-            } else {
-                return null; // not a simple case alternation
-            }
-        } else {
-            return null; // non-bracket character
-        }
-    }
-    if (buf.items.len >= 2) return buf.toOwnedSlice() catch null;
-    return null;
-}
-
-fn detectSimplePrefix(pattern: []const u8) ?[]const u8 {
-    if (pattern.len < 2 or pattern[0] != '^') return null;
-    // Check that the rest is a literal string (no regex metacharacters)
-    const rest = pattern[1..];
-    for (rest) |ch| {
-        switch (ch) {
-            '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '\\', '$' => return null,
-            else => {},
-        }
-    }
-    return rest;
-}
-
-/// Detect an escaped literal prefix from a regex pattern.
-/// E.g., `^\$\{\{` → prefix = "${{" (3 bytes).
-/// Returns the literal prefix or null if not detectable.
-fn detectEscapedPrefix(alloc: Allocator, pattern: []const u8) ?[]const u8 {
-    if (pattern.len < 4 or pattern[0] != '^') return null;
-    var buf = std.ArrayList(u8).init(alloc);
-    var i: usize = 1;
-    while (i < pattern.len) {
-        const ch = pattern[i];
-        if (ch == '\\' and i + 1 < pattern.len) {
-            const next = pattern[i + 1];
-            switch (next) {
-                '$', '{', '}', '(', ')', '[', ']', '.', '*', '+', '?', '|', '^', '\\' => {
-                    buf.append(next) catch return null;
-                    i += 2;
-                },
-                else => break, // unknown escape
-            }
-        } else {
-            switch (ch) {
-                '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '$' => break, // metachar
-                else => {
-                    buf.append(ch) catch return null;
-                    i += 1;
-                },
-            }
-        }
-    }
-    // Only use as simple_prefix if remaining pattern is empty or just .*/$
-    // (i.e., the prefix is a sufficient condition for matching)
-    if (buf.items.len >= 2) {
-        const remaining = pattern[i..];
-        if (remaining.len == 0 or
-            std.mem.eql(u8, remaining, "$") or
-            std.mem.eql(u8, remaining, ".*") or
-            std.mem.eql(u8, remaining, ".*$"))
-        {
-            return buf.toOwnedSlice() catch null;
-        }
-    }
-    return null;
-}
-
-/// Check if a string matches the identifier pattern ^[_a-zA-Z][a-zA-Z0-9_-]*$
-/// Very common in JSON Schema (property name patterns).
-fn isIdentifierPattern(pattern: []const u8) bool {
-    // Only match patterns where first char includes _ (matchesIdentifierPattern allows _)
-    return std.mem.eql(u8, pattern, "^[_a-zA-Z][a-zA-Z0-9_-]*$") or
-        std.mem.eql(u8, pattern, "^[a-zA-Z_][a-zA-Z0-9_-]*$");
-}
-
-fn matchesIdentifierPattern(s: []const u8) bool {
-    if (s.len == 0) return false;
-    const first = s[0];
-    // All 3 patterns allow [a-zA-Z] as first char; only first 2 allow _
-    if (!((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_')) return false;
-    // Rest: [a-zA-Z0-9_-]*
-    for (s[1..]) |ch| {
-        if (!((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-')) return false;
-    }
-    return true;
 }
 
 /// Compile patternProperties into pre-compiled regex + linked schemas.
@@ -3375,28 +2895,8 @@ fn compilePatternProperties(
         const pattern = entry.key_ptr.*;
         const sub_schema = entry.value_ptr.*;
         const cr = alloc.create(CompiledRegex) catch continue;
-        cr.ecma = null;
-        cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
-        cr.is_identifier = isIdentifierPattern(pattern);
-        cr.char_class = null;
-        cr.char_class_mode = .first_char;
-        cr.literal_set = null;
-        cr.ci_literal = null;
-        if (cr.simple_prefix == null and !cr.is_identifier) {
-            if (detectCharClass(pattern)) |cc| {
-                cr.char_class = cc.bitmap;
-                cr.char_class_mode = cc.mode;
-            } else if (detectLiteralSet(alloc, pattern)) |lset| {
-                cr.literal_set = lset;
-            } else if (detectCILiteral(alloc, pattern)) |ci| {
-                cr.ci_literal = ci;
-            }
-        }
-        cr.fast = FastRegex.compile(pattern, alloc);
-        if (cr.fast == null) {
-            cr.ecma = EcmaRegex.compile(pattern, alloc);
-        }
-        cr.valid = cr.fast != null or cr.ecma != null;
+        cr.ecma = EcmaRegex.compile(pattern, alloc);
+        cr.valid = cr.ecma != null;
         regex_list.append(cr) catch {};
         entries.append(.{
             .regex = cr,
@@ -3640,28 +3140,10 @@ fn collectStaticCeiling(
             while (pp_it.next()) |entry| {
                 const pattern = entry.key_ptr.*;
                 const cr = alloc.create(CompiledRegex) catch continue;
-                cr.ecma = null;
-                cr.simple_prefix = detectSimplePrefix(pattern) orelse detectEscapedPrefix(alloc, pattern);
-                cr.is_identifier = isIdentifierPattern(pattern);
-                cr.char_class = null;
-                cr.char_class_mode = .first_char;
-                cr.literal_set = null;
-                cr.ci_literal = null;
-                if (cr.simple_prefix == null and !cr.is_identifier) {
-                    if (detectCharClass(pattern)) |cc| {
-                        cr.char_class = cc.bitmap;
-                        cr.char_class_mode = cc.mode;
-                    } else if (detectLiteralSet(alloc, pattern)) |lset| {
-                        cr.literal_set = lset;
-                    }
-                }
-                cr.fast = FastRegex.compile(pattern, alloc);
-                if (cr.fast == null) {
-                    cr.ecma = EcmaRegex.compile(pattern, alloc);
-                }
-                cr.valid = cr.fast != null or cr.ecma != null;
+                cr.ecma = EcmaRegex.compile(pattern, alloc);
+                cr.valid = cr.ecma != null;
                 regex_list.append(cr) catch {};
-                if (cr.valid or cr.simple_prefix != null or cr.is_identifier or cr.char_class != null or cr.literal_set != null) {
+                if (cr.valid) {
                     pattern_regexes.append(cr) catch {};
                 }
             }
