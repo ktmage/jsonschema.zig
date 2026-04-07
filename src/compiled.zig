@@ -2971,6 +2971,65 @@ fn extractPropertyNames(alloc: Allocator, obj: std.json.ObjectMap) []const []con
 /// Compile a POSIX regex pattern string. Returns null if not a string or compilation fails.
 /// Convert ECMA-262 regex shortcuts to POSIX ERE equivalents.
 /// \d → [0-9], \D → [^0-9], \w → [a-zA-Z0-9_], \W → [^a-zA-Z0-9_], \s → [ \t\n\r], \S → [^ \t\n\r]
+/// Fix character class dashes for POSIX ERE compatibility.
+fn fixCharClassDashes(alloc: Allocator, pattern: []const u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, pattern, '[') == null) return null;
+    var buf = std.ArrayList(u8).init(alloc);
+    var i: usize = 0;
+    var modified = false;
+    while (i < pattern.len) {
+        if (pattern[i] == '\\' and i + 1 < pattern.len) {
+            buf.append(pattern[i]) catch return null;
+            buf.append(pattern[i + 1]) catch return null;
+            i += 2;
+            continue;
+        }
+        if (pattern[i] != '[') { buf.append(pattern[i]) catch return null; i += 1; continue; }
+        buf.append('[') catch return null;
+        i += 1;
+        if (i < pattern.len and pattern[i] == '^') { buf.append('^') catch return null; i += 1; }
+        if (i < pattern.len and pattern[i] == ']') { buf.append(']') catch return null; i += 1; }
+        var extra_dash = false;
+        while (i < pattern.len and pattern[i] != ']') {
+            if (pattern[i] == '\\' and i + 1 < pattern.len) {
+                buf.append(pattern[i]) catch return null;
+                buf.append(pattern[i + 1]) catch return null;
+                i += 2;
+                continue;
+            }
+            if (pattern[i] == '-') {
+                const has_prev = buf.items.len > 0 and buf.items[buf.items.len - 1] != '[' and buf.items[buf.items.len - 1] != '^';
+                const has_next = i + 1 < pattern.len and pattern[i + 1] != ']';
+                if (has_prev and has_next) {
+                    const prev_ch = buf.items[buf.items.len - 1];
+                    const next_ch = pattern[i + 1];
+                    const is_std_range = (prev_ch >= 'a' and prev_ch <= 'z' and next_ch >= 'a' and next_ch <= 'z') or
+                        (prev_ch >= 'A' and prev_ch <= 'Z' and next_ch >= 'A' and next_ch <= 'Z') or
+                        (prev_ch >= '0' and prev_ch <= '9' and next_ch >= '0' and next_ch <= '9');
+                    if (is_std_range and next_ch >= prev_ch) {
+                        buf.append('-') catch return null;
+                        i += 1;
+                        continue;
+                    }
+                    extra_dash = true;
+                    modified = true;
+                    i += 1;
+                    continue;
+                }
+                buf.append('-') catch return null;
+                i += 1;
+                continue;
+            }
+            buf.append(pattern[i]) catch return null;
+            i += 1;
+        }
+        if (extra_dash) buf.append('-') catch return null;
+        if (i < pattern.len) { buf.append(']') catch return null; i += 1; }
+    }
+    if (!modified) return null;
+    return buf.toOwnedSlice() catch null;
+}
+
 pub fn convertEcmaToPostfix(alloc: Allocator, pattern: []const u8) ![]const u8 {
     // Quick check: does the pattern contain any ECMA-specific features?
     var needs_conversion = false;
@@ -2989,12 +3048,29 @@ pub fn convertEcmaToPostfix(alloc: Allocator, pattern: []const u8) ![]const u8 {
             needs_conversion = true;
             break;
         }
+        // (?=...) / (?!...) lookahead — not supported in POSIX ERE, strip them
+        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and (pattern[i + 2] == '=' or pattern[i + 2] == '!')) {
+            needs_conversion = true;
+            break;
+        }
     }
     if (!needs_conversion) return pattern;
 
     var buf = std.ArrayList(u8).init(alloc);
     var i: usize = 0;
     while (i < pattern.len) {
+        // Strip lookahead (?=...) and (?!...) — POSIX ERE has no equivalent
+        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and (pattern[i + 2] == '=' or pattern[i + 2] == '!')) {
+            var depth: usize = 1;
+            var j = i + 3;
+            while (j < pattern.len and depth > 0) : (j += 1) {
+                if (pattern[j] == '\\' and j + 1 < pattern.len) { j += 1; continue; }
+                if (pattern[j] == '(') depth += 1;
+                if (pattern[j] == ')') depth -= 1;
+            }
+            i = j;
+            continue;
+        }
         // Convert (?:...) to (...)
         if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and pattern[i + 2] == ':') {
             try buf.append('(');
@@ -3062,8 +3138,26 @@ fn compileRegex(alloc: Allocator, pattern_val: std.json.Value, regex_list: *std.
             cr.cached_regex = rp;
             cr.valid = true;
         } else {
-            cFreeRegex(rp);
-            cr.valid = false;
+            // Retry: fix character class dashes for POSIX compatibility
+            const fixed = fixCharClassDashes(alloc, posix_pattern);
+            if (fixed) |fp| {
+                if (alloc.dupeZ(u8, fp)) |fz| {
+                    cr.pattern_z = fz.ptr;
+                    if (c.regcomp(rp, fz.ptr, c.REG_EXTENDED | c.REG_NOSUB) == 0) {
+                        cr.cached_regex = rp;
+                        cr.valid = true;
+                    } else {
+                        cFreeRegex(rp);
+                        cr.valid = false;
+                    }
+                } else |_| {
+                    cFreeRegex(rp);
+                    cr.valid = false;
+                }
+            } else {
+                cFreeRegex(rp);
+                cr.valid = false;
+            }
         }
     } else {
         cr.valid = false;
