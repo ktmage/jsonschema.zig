@@ -3048,29 +3048,12 @@ pub fn convertEcmaToPostfix(alloc: Allocator, pattern: []const u8) ![]const u8 {
             needs_conversion = true;
             break;
         }
-        // (?=...) / (?!...) lookahead — not supported in POSIX ERE, strip them
-        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and (pattern[i + 2] == '=' or pattern[i + 2] == '!')) {
-            needs_conversion = true;
-            break;
-        }
     }
     if (!needs_conversion) return pattern;
 
     var buf = std.ArrayList(u8).init(alloc);
     var i: usize = 0;
     while (i < pattern.len) {
-        // Strip lookahead (?=...) and (?!...) — POSIX ERE has no equivalent
-        if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and (pattern[i + 2] == '=' or pattern[i + 2] == '!')) {
-            var depth: usize = 1;
-            var j = i + 3;
-            while (j < pattern.len and depth > 0) : (j += 1) {
-                if (pattern[j] == '\\' and j + 1 < pattern.len) { j += 1; continue; }
-                if (pattern[j] == '(') depth += 1;
-                if (pattern[j] == ')') depth -= 1;
-            }
-            i = j;
-            continue;
-        }
         // Convert (?:...) to (...)
         if (i + 2 < pattern.len and pattern[i] == '(' and pattern[i + 1] == '?' and pattern[i + 2] == ':') {
             try buf.append('(');
