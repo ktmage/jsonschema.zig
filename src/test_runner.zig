@@ -37,13 +37,13 @@ fn runTestFile(
             // Copy remotes
             var remote_it = remotes_registry.schemas.iterator();
             while (remote_it.next()) |entry| {
-                registry.addSchema(entry.key_ptr.*, entry.value_ptr.*);
+                try registry.addSchema(entry.key_ptr.*, entry.value_ptr.*);
             }
 
             // Scan schema for $id declarations
             const base_uri = getSchemaId(schema) orelse "";
             if (base_uri.len > 0) {
-                registry.addSchema(base_uri, schema);
+                try registry.addSchema(base_uri, schema);
             }
             registry.scanIds(base_uri, schema);
 
@@ -122,7 +122,7 @@ fn loadRemotes(
             // Keep parsed alive by storing it
             parsed_list.append(parsed) catch continue;
             const uri = std.fmt.allocPrint(allocator, "http://localhost:1234/{s}", .{sub_path}) catch continue;
-            registry.addSchema(uri, parsed.value);
+            registry.addSchema(uri, parsed.value) catch continue;
             // Also scan for $id within remote schemas
             registry.scanIds(uri, parsed.value);
         }
@@ -325,11 +325,11 @@ test "compiled path matches uncompiled path — Draft 7" {
                 var registry = SchemaRegistry.init(alloc);
                 var remote_it = remotes_registry.schemas.iterator();
                 while (remote_it.next()) |re| {
-                    registry.addSchema(re.key_ptr.*, re.value_ptr.*);
+                    try registry.addSchema(re.key_ptr.*, re.value_ptr.*);
                 }
                 const base_uri = getSchemaId(schema) orelse "";
                 if (base_uri.len > 0) {
-                    registry.addSchema(base_uri, schema);
+                    try registry.addSchema(base_uri, schema);
                 }
                 registry.scanIds(base_uri, schema);
 

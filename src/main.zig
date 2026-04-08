@@ -2,13 +2,19 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const JsonPointer = @import("json_pointer.zig");
-pub const Validator = @import("validator.zig");
+const Validator = @import("validator.zig");
 pub const CustomKeyword = Validator.CustomKeyword;
+pub const KeywordValidator = Validator.KeywordValidator;
 pub const SchemaRegistry = @import("schema_registry.zig").SchemaRegistry;
 const schema_registry_mod = @import("schema_registry.zig");
-pub const compiled_mod = @import("compiled.zig");
+const compiled_mod = @import("compiled.zig");
 pub const CompiledSchema = compiled_mod.CompiledSchema;
 
+/// A single validation error.
+///
+/// All string fields (`instance_path`, `schema_path`, `message`) are owned by the
+/// enclosing `ValidationResult` and freed when `ValidationResult.deinit()` is called.
+/// Do not store references to these strings beyond the lifetime of the result.
 pub const ValidationError = struct {
     instance_path: []const u8,
     schema_path: []const u8,
@@ -16,14 +22,23 @@ pub const ValidationError = struct {
     message: []const u8,
 };
 
+/// The result of a schema validation.
+///
+/// Use `isValid()` to check whether the instance passed validation.
+/// When done inspecting errors, call `deinit()` to release all memory
+/// associated with the error messages. Every `ValidationResult` returned
+/// by the library **must** be `deinit()`-ed to avoid memory leaks (even
+/// when `isValid()` is true).
 pub const ValidationResult = struct {
     errors: []const ValidationError,
     allocator: Allocator,
 
+    /// Returns `true` when the instance is valid against the schema.
     pub fn isValid(self: ValidationResult) bool {
         return self.errors.len == 0;
     }
 
+    /// Frees all memory owned by this result, including error message strings.
     pub fn deinit(self: ValidationResult) void {
         for (self.errors) |err| {
             self.allocator.free(err.instance_path);
@@ -34,12 +49,30 @@ pub const ValidationResult = struct {
     }
 };
 
+/// Options for validation behavior.
+pub const ValidateOptions = struct {
+    /// Enable format keyword assertion evaluation (default: disabled per spec).
+    validate_formats: bool = false,
+    /// Custom keyword validators.
+    custom_keywords: ?[]const CustomKeyword = null,
+};
+
 pub fn validate(
     allocator: Allocator,
     schema: std.json.Value,
     instance: std.json.Value,
 ) ValidationResult {
-    return validateFull(allocator, schema, schema, instance, "", "", null, "", null, null);
+    return validateWithOptions(allocator, schema, instance, .{});
+}
+
+/// Validate with options (format control, custom keywords, etc.)
+pub fn validateWithOptions(
+    allocator: Allocator,
+    schema: std.json.Value,
+    instance: std.json.Value,
+    options: ValidateOptions,
+) ValidationResult {
+    return validateFull(allocator, schema, schema, instance, "", "", null, "", null, null, options);
 }
 
 /// Boolean-only validation: returns true/false without collecting errors.
@@ -171,7 +204,7 @@ pub fn validateCompiledWithRegistry(
         };
     };
     dynamic_scope.append(.{ .base_uri = root_base, .schema = compiled.schema }) catch {};
-    return validateFull(allocator, compiled.schema, compiled.schema, instance, "", "", registry, "", &dynamic_scope, compiled);
+    return validateFull(allocator, compiled.schema, compiled.schema, instance, "", "", registry, "", &dynamic_scope, compiled, .{});
 }
 
 pub fn validateWithRegistry(
@@ -196,10 +229,10 @@ pub fn validateWithRegistry(
         };
     };
     dynamic_scope.append(.{ .base_uri = root_base, .schema = schema }) catch {};
-    return validateFull(allocator, schema, schema, instance, "", "", registry, "", &dynamic_scope, null);
+    return validateFull(allocator, schema, schema, instance, "", "", registry, "", &dynamic_scope, null, .{});
 }
 
-pub fn validateWithPath(
+fn validateWithPath(
     allocator: Allocator,
     root_schema: std.json.Value,
     schema: std.json.Value,
@@ -207,10 +240,10 @@ pub fn validateWithPath(
     instance_path: []const u8,
     schema_path: []const u8,
 ) ValidationResult {
-    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, null, "", null, null);
+    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, null, "", null, null, .{});
 }
 
-pub fn validateWithContext(
+fn validateWithContext(
     allocator: Allocator,
     root_schema: std.json.Value,
     schema: std.json.Value,
@@ -219,7 +252,7 @@ pub fn validateWithContext(
     schema_path: []const u8,
     registry: ?*SchemaRegistry,
 ) ValidationResult {
-    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, registry, "", null, null);
+    return validateFull(allocator, root_schema, schema, instance, instance_path, schema_path, registry, "", null, null, .{});
 }
 
 pub fn validateFull(
@@ -233,6 +266,7 @@ pub fn validateFull(
     parent_base_uri: []const u8,
     dynamic_scope: ?*std.ArrayList(Validator.DynamicScopeEntry),
     compiled: ?*const CompiledSchema,
+    options: ValidateOptions,
 ) ValidationResult {
     switch (schema) {
         .bool => |b| {
@@ -312,6 +346,8 @@ pub fn validateFull(
         .ref_base_uri = ref_base_uri,
         .dynamic_scope = dynamic_scope,
         .compiled = compiled,
+        .validate_formats = options.validate_formats,
+        .custom_keywords = options.custom_keywords,
     };
 
     Validator.validateAll(ctx);

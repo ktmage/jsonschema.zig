@@ -204,13 +204,8 @@ pub const SchemaRegistry = struct {
     }
 
     /// Register an external schema by URI.
-    pub fn addSchema(self: *SchemaRegistry, uri: []const u8, schema: std.json.Value) void {
-        const key = self.allocator.dupe(u8, uri) catch return;
-        self.schemas.put(key, schema) catch return;
-    }
-
-    /// Register an external schema by URI (alias for addSchema).
-    pub fn put(self: *SchemaRegistry, uri: []const u8, schema: std.json.Value) !void {
+    /// Register an external schema by URI.
+    pub fn addSchema(self: *SchemaRegistry, uri: []const u8, schema: std.json.Value) !void {
         const key = try self.allocator.dupe(u8, uri);
         try self.schemas.put(key, schema);
     }
@@ -230,6 +225,13 @@ pub const SchemaRegistry = struct {
         var current_base = base_uri;
         if (obj.get("$id")) |id_val| {
             if (asString(id_val)) |id_str| {
+                // Spec MUST NOT: $id must not contain a non-empty fragment
+                if (std.mem.indexOfScalar(u8, id_str, '#')) |hash_pos| {
+                    if (hash_pos + 1 < id_str.len and id_str[0] != '#') {
+                        // Non-empty fragment in absolute/relative URI — skip per spec
+                        return;
+                    }
+                }
                 if (isAnchor(id_str)) {
                     // Anchor: $id = "#foo"
                     const anchor_uri = resolveUri(self.allocator, base_uri, id_str);
@@ -247,11 +249,13 @@ pub const SchemaRegistry = struct {
         }
 
         // Support $anchor keyword (Draft 2020-12)
+        // Spec MUST: $anchor value must start with [A-Za-z_], followed by [A-Za-z0-9._-]
         if (obj.get("$anchor")) |anchor_val| {
             if (asString(anchor_val)) |anchor_str| {
-                // Register as base_uri#anchor_name
-                const anchor_uri = std.fmt.allocPrint(self.allocator, "{s}#{s}", .{ current_base, anchor_str }) catch return;
-                self.anchors.put(anchor_uri, schema) catch return;
+                if (isValidAnchorName(anchor_str)) {
+                    const anchor_uri = std.fmt.allocPrint(self.allocator, "{s}#{s}", .{ current_base, anchor_str }) catch return;
+                    self.anchors.put(anchor_uri, schema) catch return;
+                }
             }
         }
 
@@ -485,6 +489,17 @@ fn schemeEnd(uri: []const u8) ?usize {
 
 fn isAnchor(id: []const u8) bool {
     return id.len > 0 and id[0] == '#';
+}
+
+/// Validate $anchor name per spec: must start with [A-Za-z_], followed by [A-Za-z0-9._-]
+fn isValidAnchorName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    const first = name[0];
+    if (!std.ascii.isAlphabetic(first) and first != '_') return false;
+    for (name[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '.' and ch != '_' and ch != '-') return false;
+    }
+    return true;
 }
 
 pub fn stripFragment(uri: []const u8) []const u8 {

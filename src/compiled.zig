@@ -37,15 +37,25 @@ pub const CompiledSchema = struct {
     );
 
     /// Compile a schema into a CompiledSchema.
-    /// The caller must ensure the `schema` JSON value outlives this CompiledSchema.
-    /// An optional `registry` is used only during compile to pre-scan $id entries;
-    /// it is NOT stored — callers pass their own registry at validation time.
+    ///
+    /// The caller must ensure the `schema` JSON value outlives this CompiledSchema —
+    /// do not call `schema.deinit()` before `compiled.deinit()`.
+    ///
+    /// Internally allocates an arena that is freed by `deinit()`. The `allocator`
+    /// parameter is used as the backing allocator for that arena.
+    ///
+    /// An optional `registry` is used only during compile to pre-scan `$id` entries;
+    /// it is **not** stored — callers pass their own registry at validation time.
+    ///
+    /// Thread safety: a `CompiledSchema` is read-only after compilation and can be
+    /// shared across threads for concurrent validation. Each validation call must
+    /// use its own allocator and `ValidationResult`.
     pub fn compile(
-        child_allocator: Allocator,
+        allocator: Allocator,
         schema: std.json.Value,
         registry: ?*SchemaRegistry,
     ) CompiledSchema {
-        var arena = std.heap.ArenaAllocator.init(child_allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
         const alloc = arena.allocator();
 
         // Detect draft version and vocabulary settings early
@@ -162,6 +172,7 @@ pub const CompiledSchema = struct {
         return self.anchor_cache.get(anchor_name);
     }
 
+    /// Returns memory usage statistics for this compiled schema.
     pub fn deinit(self: *CompiledSchema) void {
         // Free cached regex allocations
         for (self.compiled_regexes) |cr| {

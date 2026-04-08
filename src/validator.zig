@@ -243,6 +243,7 @@ pub const Context = struct {
             self.base_uri,
             self.dynamic_scope,
             self.compiled,
+            .{},
         );
     }
 
@@ -302,6 +303,7 @@ pub const Context = struct {
             self.base_uri,
             self.dynamic_scope,
             self.compiled,
+            .{},
         );
         defer result.deinit();
         return result.isValid();
@@ -361,6 +363,7 @@ pub const Context = struct {
             self.base_uri,
             self.dynamic_scope,
             self.compiled,
+            .{},
         );
         defer result.deinit();
         return result.isValid();
@@ -402,6 +405,14 @@ pub const CustomKeyword = struct {
     name: []const u8,
     /// The validation function (opaque fn pointer to break dependency loop).
     validate: *const anyopaque,
+
+    /// Create a CustomKeyword from a keyword name and a typed validator function.
+    pub fn init(name: []const u8, func: KeywordValidator) CustomKeyword {
+        return .{
+            .name = name,
+            .validate = @ptrCast(func),
+        };
+    }
 
     pub fn call(self: CustomKeyword, ctx: Context) void {
         const func: KeywordValidator = @ptrCast(@alignCast(self.validate));

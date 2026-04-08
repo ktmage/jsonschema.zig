@@ -162,7 +162,7 @@ var registry = jsonschema.SchemaRegistry.init(allocator);
 defer registry.deinit();
 
 // Register external schemas by URI
-try registry.put("https://example.com/address.json", address_schema.value);
+try registry.addSchema("https://example.com/address.json", address_schema.value);
 
 // Validate with registry
 const result = jsonschema.validateWithRegistry(
@@ -173,7 +173,7 @@ const result = jsonschema.validateWithRegistry(
 );
 ```
 
-> **Remote schemas**: The library does not automatically fetch remote `$ref` URIs. Fetch schemas yourself (e.g., via `std.http.Client`) and register them with `registry.put()` before validation.
+> **Remote schemas**: The library does not automatically fetch remote `$ref` URIs. Fetch schemas yourself (e.g., via `std.http.Client`) and register them with `registry.addSchema()` before validation.
 
 ## Error Details
 
