@@ -31,6 +31,7 @@ pub const ValidationError = struct {
 /// when `isValid()` is true).
 pub const ValidationResult = struct {
     errors: []const ValidationError,
+    annotations: []const Annotation = &.{},
     allocator: Allocator,
 
     /// Returns `true` when the instance is valid against the schema.
@@ -46,7 +47,24 @@ pub const ValidationResult = struct {
             self.allocator.free(err.message);
         }
         self.allocator.free(self.errors);
+        for (self.annotations) |ann| {
+            self.allocator.free(ann.instance_path);
+            self.allocator.free(ann.schema_path);
+        }
+        if (self.annotations.len > 0) self.allocator.free(self.annotations);
     }
+};
+
+/// A collected annotation from a schema keyword.
+pub const Annotation = struct {
+    /// The keyword that produced this annotation (e.g., "title", "description", "default").
+    keyword: []const u8,
+    /// JSON Pointer to the instance location.
+    instance_path: []const u8,
+    /// JSON Pointer to the schema keyword location.
+    schema_path: []const u8,
+    /// The annotation value as a JSON value.
+    value: std.json.Value,
 };
 
 /// Options for validation behavior.
@@ -55,6 +73,8 @@ pub const ValidateOptions = struct {
     validate_formats: bool = false,
     /// Custom keyword validators.
     custom_keywords: ?[]const CustomKeyword = null,
+    /// Enable annotation collection (default: disabled for performance).
+    collect_annotations: bool = false,
 };
 
 pub fn validate(
@@ -332,6 +352,7 @@ pub fn validateFull(
     }
 
     var errors = std.ArrayList(ValidationError).init(allocator);
+    var annotations_list = if (options.collect_annotations) std.ArrayList(Annotation).init(allocator) else std.ArrayList(Annotation){ .items = &.{}, .capacity = 0, .allocator = allocator };
 
     const ctx = Validator.Context{
         .allocator = allocator,
@@ -348,12 +369,15 @@ pub fn validateFull(
         .compiled = compiled,
         .validate_formats = options.validate_formats,
         .custom_keywords = options.custom_keywords,
+        .collect_annotations = options.collect_annotations,
+        .annotations = if (options.collect_annotations) &annotations_list else null,
     };
 
     Validator.validateAll(ctx);
 
     return .{
         .errors = errors.toOwnedSlice() catch &.{},
+        .annotations = if (options.collect_annotations) annotations_list.toOwnedSlice() catch &.{} else &.{},
         .allocator = allocator,
     };
 }

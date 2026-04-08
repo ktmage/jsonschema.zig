@@ -72,6 +72,10 @@ pub const Context = struct {
     validate_formats: bool = false,
     /// Custom keyword validators registered by the user.
     custom_keywords: ?[]const CustomKeyword = null,
+    /// Enable annotation collection (opt-in for performance).
+    collect_annotations: bool = false,
+    /// Collected annotations (only populated when collect_annotations is true).
+    annotations: ?*std.ArrayList(jsonschema.Annotation) = null,
 
     /// Recursively validate instance against a sub-schema.
     pub fn validateSubschema(
@@ -391,6 +395,22 @@ pub const Context = struct {
             .message = msg,
         }) catch {
             self.allocator.free(msg);
+            self.allocator.free(ip);
+        };
+    }
+
+    /// Collect an annotation (only when collect_annotations is enabled).
+    pub fn addAnnotation(self: Context, keyword: []const u8, value: std.json.Value) void {
+        if (!self.collect_annotations) return;
+        const ann_list = self.annotations orelse return;
+        const ip = self.allocator.dupe(u8, self.instance_path) catch return;
+        const sp = JsonPointer.appendProperty(self.allocator, self.schema_path, keyword);
+        ann_list.append(.{
+            .keyword = keyword,
+            .instance_path = ip,
+            .schema_path = sp,
+            .value = value,
+        }) catch {
             self.allocator.free(ip);
         };
     }
@@ -1767,6 +1787,25 @@ pub fn validateAll(ctx: Context) void {
             if (schema_obj.get(kw.name) != null) {
                 kw.call(ctx);
             }
+        }
+    }
+
+    // Collect annotations (opt-in, zero cost when disabled)
+    if (ctx.collect_annotations) {
+        const annotation_keywords = [_][]const u8{
+            "title",            "description",   "default",
+            "deprecated",       "readOnly",      "writeOnly",
+            "examples",         "$comment",      "contentEncoding",
+            "contentMediaType", "contentSchema",
+        };
+        for (annotation_keywords) |kw| {
+            if (schema_obj.get(kw)) |val| {
+                ctx.addAnnotation(kw, val);
+            }
+        }
+        // format is always collected as annotation when present (per spec)
+        if (schema_obj.get("format")) |val| {
+            ctx.addAnnotation("format", val);
         }
     }
 }
