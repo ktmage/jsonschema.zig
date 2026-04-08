@@ -540,6 +540,37 @@ fn isValidationVocabDisabled(ctx: Context) bool {
         else => return false,
     };
 
+    // Spec MUST: if $vocabulary lists an unknown vocabulary as required (true),
+    // the implementation must refuse to process the schema.
+    const known_vocabs = [_][]const u8{
+        "https://json-schema.org/draft/2020-12/vocab/core",
+        "https://json-schema.org/draft/2020-12/vocab/applicator",
+        "https://json-schema.org/draft/2020-12/vocab/unevaluated",
+        "https://json-schema.org/draft/2020-12/vocab/validation",
+        "https://json-schema.org/draft/2020-12/vocab/meta-data",
+        "https://json-schema.org/draft/2020-12/vocab/format-annotation",
+        "https://json-schema.org/draft/2020-12/vocab/format-assertion",
+        "https://json-schema.org/draft/2020-12/vocab/content",
+    };
+    var vocab_it = vocab_obj.iterator();
+    while (vocab_it.next()) |entry| {
+        const required = switch (entry.value_ptr.*) {
+            .bool => |b| b,
+            else => false,
+        };
+        if (required) {
+            const uri = entry.key_ptr.*;
+            var known = false;
+            for (known_vocabs) |kv| {
+                if (std.mem.eql(u8, uri, kv)) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) return false; // Unknown required vocabulary — refuse processing
+        }
+    }
+
     // If $vocabulary exists but doesn't include the validation vocabulary, it's disabled
     return vocab_obj.get("https://json-schema.org/draft/2020-12/vocab/validation") == null;
 }
