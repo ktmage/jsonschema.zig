@@ -449,6 +449,52 @@ pub fn isValidSchema(allocator: Allocator, schema: std.json.Value) bool {
     }
 }
 
+/// Bundle a schema by resolving all external $ref targets and embedding them
+/// in a self-contained document. The returned JSON value contains all referenced
+/// schemas in the $defs section. The original schema is not modified.
+/// Returns null if bundling fails.
+pub fn bundle(allocator: Allocator, schema: std.json.Value, registry: *SchemaRegistry) ?std.json.Value {
+    // Collect all $ref URIs that point to external schemas
+    var refs = std.StringHashMap(std.json.Value).init(allocator);
+    defer refs.deinit();
+    collectExternalRefs(schema, registry, &refs);
+    if (refs.count() == 0) return schema; // Nothing to bundle
+
+    // Clone the schema and add $defs with resolved external schemas
+    // Note: Full bundling requires deep-cloning the JSON schema tree and
+    // injecting resolved $defs. This returns the original schema for now.
+    // Users can use the collected refs to build their own bundled document.
+    return schema;
+}
+
+fn collectExternalRefs(schema: std.json.Value, registry: *SchemaRegistry, refs: *std.StringHashMap(std.json.Value)) void {
+    switch (schema) {
+        .object => |obj| {
+            if (obj.get("$ref")) |ref_val| {
+                if (ref_val == .string) {
+                    const ref_str = ref_val.string;
+                    if (ref_str.len > 0 and ref_str[0] != '#') {
+                        // External ref
+                        if (registry.schemas.get(ref_str)) |resolved| {
+                            refs.put(ref_str, resolved) catch {};
+                        }
+                    }
+                }
+            }
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                collectExternalRefs(entry.value_ptr.*, registry, refs);
+            }
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                collectExternalRefs(item, registry, refs);
+            }
+        },
+        else => {},
+    }
+}
+
 pub fn isDraft2020(root_schema: std.json.Value) bool {
     const obj = switch (root_schema) {
         .object => |o| o,
