@@ -9,6 +9,7 @@ pub const SchemaRegistry = @import("schema_registry.zig").SchemaRegistry;
 const schema_registry_mod = @import("schema_registry.zig");
 const compiled_mod = @import("compiled.zig");
 pub const CompiledSchema = compiled_mod.CompiledSchema;
+pub const output = @import("output.zig");
 
 /// A single validation error.
 ///
@@ -450,21 +451,55 @@ pub fn isValidSchema(allocator: Allocator, schema: std.json.Value) bool {
 }
 
 /// Bundle a schema by resolving all external $ref targets and embedding them
-/// in a self-contained document. The returned JSON value contains all referenced
-/// schemas in the $defs section. The original schema is not modified.
-/// Returns null if bundling fails.
+/// in a self-contained document with $defs. The caller owns the returned JSON
+/// (all strings and containers are heap-allocated via `allocator`).
+/// Returns null if bundling fails (allocation error).
 pub fn bundle(allocator: Allocator, schema: std.json.Value, registry: *SchemaRegistry) ?std.json.Value {
-    // Collect all $ref URIs that point to external schemas
-    var refs = std.StringHashMap(std.json.Value).init(allocator);
-    defer refs.deinit();
-    collectExternalRefs(schema, registry, &refs);
-    if (refs.count() == 0) return schema; // Nothing to bundle
+    // Step 1: Collect all external $ref URIs recursively
+    var external_refs = std.StringHashMap(std.json.Value).init(allocator);
+    defer external_refs.deinit();
+    collectExternalRefs(schema, registry, &external_refs);
+    if (external_refs.count() == 0) return deepClone(allocator, schema);
 
-    // Clone the schema and add $defs with resolved external schemas
-    // Note: Full bundling requires deep-cloning the JSON schema tree and
-    // injecting resolved $defs. This returns the original schema for now.
-    // Users can use the collected refs to build their own bundled document.
-    return schema;
+    // Step 2: Deep clone the schema
+    var cloned = deepClone(allocator, schema) orelse return null;
+
+    // Step 3: Add $defs with all resolved external schemas
+    var cloned_obj = switch (cloned) {
+        .object => |*o| o,
+        else => return cloned,
+    };
+    // Get or create $defs — must use getPtr to get a pointer into the map
+    if (cloned_obj.getPtr("$defs") == null or cloned_obj.getPtr("$defs").?.* != .object) {
+        const defs_key = allocator.dupe(u8, "$defs") catch return null;
+        cloned_obj.put(defs_key, .{ .object = std.json.ObjectMap.init(allocator) }) catch return null;
+    }
+    const defs = &cloned_obj.getPtr("$defs").?.object;
+
+    // Add each external schema to $defs
+    var ref_it = external_refs.iterator();
+    while (ref_it.next()) |entry| {
+        const uri = entry.key_ptr.*;
+        const ext_schema = entry.value_ptr.*;
+        // Use URI as key, replacing / and : with _ for safety
+        const safe_key = makeSafeKey(allocator, uri) orelse continue;
+        const cloned_ext = deepClone(allocator, ext_schema) orelse continue;
+        defs.put(safe_key, cloned_ext) catch {};
+    }
+
+    // Step 4: Rewrite external $ref URIs to point to #/$defs/...
+    rewriteExternalRefs(&cloned, &external_refs, allocator);
+
+    return cloned;
+}
+
+/// Create a safe key from a URI by replacing / and : with _
+fn makeSafeKey(allocator: Allocator, uri: []const u8) ?[]u8 {
+    const safe_key = allocator.dupe(u8, uri) catch return null;
+    for (safe_key) |*ch| {
+        if (ch.* == '/' or ch.* == ':') ch.* = '_';
+    }
+    return safe_key;
 }
 
 fn collectExternalRefs(schema: std.json.Value, registry: *SchemaRegistry, refs: *std.StringHashMap(std.json.Value)) void {
@@ -474,9 +509,13 @@ fn collectExternalRefs(schema: std.json.Value, registry: *SchemaRegistry, refs: 
                 if (ref_val == .string) {
                     const ref_str = ref_val.string;
                     if (ref_str.len > 0 and ref_str[0] != '#') {
-                        // External ref
-                        if (registry.schemas.get(ref_str)) |resolved| {
-                            refs.put(ref_str, resolved) catch {};
+                        // Skip if already collected (prevents infinite recursion on circular refs)
+                        if (refs.get(ref_str) == null) {
+                            if (registry.schemas.get(ref_str)) |resolved| {
+                                refs.put(ref_str, resolved) catch {};
+                                // Recurse into resolved schema to find transitive refs
+                                collectExternalRefs(resolved, registry, refs);
+                            }
                         }
                     }
                 }
@@ -490,6 +529,90 @@ fn collectExternalRefs(schema: std.json.Value, registry: *SchemaRegistry, refs: 
             for (arr.items) |item| {
                 collectExternalRefs(item, registry, refs);
             }
+        },
+        else => {},
+    }
+}
+
+fn rewriteExternalRefs(val: *std.json.Value, refs: *const std.StringHashMap(std.json.Value), allocator: Allocator) void {
+    switch (val.*) {
+        .object => |*obj| {
+            if (obj.getPtr("$ref")) |ref_ptr| {
+                if (ref_ptr.* == .string) {
+                    const ref_str = ref_ptr.string;
+                    if (ref_str.len > 0 and ref_str[0] != '#') {
+                        if (refs.get(ref_str) != null) {
+                            // Rewrite to #/$defs/safe_key
+                            const safe_key = makeSafeKey(allocator, ref_str) orelse return;
+                            defer allocator.free(safe_key);
+                            const new_ref = std.fmt.allocPrint(allocator, "#/$defs/{s}", .{safe_key}) catch return;
+                            ref_ptr.* = .{ .string = new_ref };
+                        }
+                    }
+                }
+            }
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                rewriteExternalRefs(entry.value_ptr, refs, allocator);
+            }
+        },
+        .array => |arr| {
+            for (arr.items) |*item| {
+                rewriteExternalRefs(item, refs, allocator);
+            }
+        },
+        else => {},
+    }
+}
+
+/// Deep clone a JSON value, allocating all strings and containers with the given allocator.
+fn deepClone(allocator: Allocator, val: std.json.Value) ?std.json.Value {
+    return switch (val) {
+        .null => .null,
+        .bool => |b| .{ .bool = b },
+        .integer => |n| .{ .integer = n },
+        .float => |f| .{ .float = f },
+        .string => |s| .{ .string = allocator.dupe(u8, s) catch return null },
+        .array => |arr| blk: {
+            var new_arr = std.json.Array.initCapacity(allocator, arr.items.len) catch return null;
+            for (arr.items) |item| {
+                new_arr.append(deepClone(allocator, item) orelse return null) catch return null;
+            }
+            break :blk .{ .array = new_arr };
+        },
+        .object => |obj| blk: {
+            var new_obj = std.json.ObjectMap.init(allocator);
+            new_obj.ensureTotalCapacity(@intCast(obj.count())) catch return null;
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const key = allocator.dupe(u8, entry.key_ptr.*) catch return null;
+                const value = deepClone(allocator, entry.value_ptr.*) orelse return null;
+                new_obj.put(key, value) catch return null;
+            }
+            break :blk .{ .object = new_obj };
+        },
+        .number_string => |s| .{ .number_string = allocator.dupe(u8, s) catch return null },
+    };
+}
+
+/// Recursively free a deep-cloned JSON value (all strings/containers heap-allocated).
+fn freeJsonValue(allocator: Allocator, val: std.json.Value) void {
+    switch (val) {
+        .string => |s| allocator.free(s),
+        .number_string => |s| allocator.free(s),
+        .array => |arr| {
+            for (arr.items) |item| freeJsonValue(allocator, item);
+            var mut_arr = arr;
+            mut_arr.deinit();
+        },
+        .object => |obj| {
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                freeJsonValue(allocator, entry.value_ptr.*);
+            }
+            var mut_obj = obj;
+            mut_obj.deinit();
         },
         else => {},
     }
@@ -535,8 +658,148 @@ fn makeSingleError(
     return .{ .errors = errors, .allocator = allocator };
 }
 
+test "bundle embeds external refs into $defs and rewrites URIs" {
+    const allocator = std.testing.allocator;
+
+    // Create a referenced schema: { "type": "string" }
+    var ref_schema_obj = std.json.ObjectMap.init(allocator);
+    defer ref_schema_obj.deinit();
+    try ref_schema_obj.put("type", .{ .string = "string" });
+    const ref_schema: std.json.Value = .{ .object = ref_schema_obj };
+
+    // Register it in a schema registry
+    var registry = SchemaRegistry.init(allocator);
+    defer registry.deinit();
+    try registry.addSchema("https://example.com/name.json", ref_schema);
+
+    // Create the root schema:
+    // { "properties": { "name": { "$ref": "https://example.com/name.json" } } }
+    var name_prop = std.json.ObjectMap.init(allocator);
+    defer name_prop.deinit();
+    try name_prop.put("$ref", .{ .string = "https://example.com/name.json" });
+
+    var props = std.json.ObjectMap.init(allocator);
+    defer props.deinit();
+    try props.put("name", .{ .object = name_prop });
+
+    var root_obj = std.json.ObjectMap.init(allocator);
+    defer root_obj.deinit();
+    try root_obj.put("properties", .{ .object = props });
+    const root_schema: std.json.Value = .{ .object = root_obj };
+
+    // Bundle
+    const bundled = bundle(allocator, root_schema, &registry) orelse return error.BundleFailed;
+    defer freeJsonValue(allocator, bundled);
+
+    // Verify $defs exists and contains the embedded schema
+    const bundled_obj = bundled.object;
+    const defs_val = bundled_obj.get("$defs") orelse return error.NoDefs;
+    const defs_obj = defs_val.object;
+
+    // The safe key for "https://example.com/name.json" is "https___example.com_name.json"
+    const safe_key = "https___example.com_name.json";
+    const embedded = defs_obj.get(safe_key) orelse return error.NoEmbeddedSchema;
+    const embedded_obj = embedded.object;
+    try std.testing.expectEqualStrings("string", embedded_obj.get("type").?.string);
+
+    // Verify $ref was rewritten
+    const bundled_props = bundled_obj.get("properties").?.object;
+    const bundled_name = bundled_props.get("name").?.object;
+    const rewritten_ref = bundled_name.get("$ref").?.string;
+    try std.testing.expectEqualStrings("#/$defs/https___example.com_name.json", rewritten_ref);
+}
+
+test "bundle handles circular references without infinite loop" {
+    const allocator = std.testing.allocator;
+
+    // Schema A references B, and B references A
+    var schema_a_obj = std.json.ObjectMap.init(allocator);
+    defer schema_a_obj.deinit();
+    try schema_a_obj.put("$ref", .{ .string = "https://example.com/b.json" });
+    const schema_a: std.json.Value = .{ .object = schema_a_obj };
+
+    var schema_b_obj = std.json.ObjectMap.init(allocator);
+    defer schema_b_obj.deinit();
+    try schema_b_obj.put("$ref", .{ .string = "https://example.com/a.json" });
+    const schema_b: std.json.Value = .{ .object = schema_b_obj };
+
+    var registry = SchemaRegistry.init(allocator);
+    defer registry.deinit();
+    try registry.addSchema("https://example.com/a.json", schema_a);
+    try registry.addSchema("https://example.com/b.json", schema_b);
+
+    // Root schema that references A
+    var root_obj = std.json.ObjectMap.init(allocator);
+    defer root_obj.deinit();
+    try root_obj.put("$ref", .{ .string = "https://example.com/a.json" });
+    const root_schema: std.json.Value = .{ .object = root_obj };
+
+    // This should not hang — must terminate despite circular refs
+    const bundled = bundle(allocator, root_schema, &registry) orelse return error.BundleFailed;
+    defer freeJsonValue(allocator, bundled);
+
+    // Verify both external refs are in $defs
+    const defs_val = bundled.object.get("$defs") orelse return error.NoDefs;
+    try std.testing.expect(defs_val.object.get("https___example.com_a.json") != null);
+    try std.testing.expect(defs_val.object.get("https___example.com_b.json") != null);
+}
+
+test "bundle with no external refs returns clone" {
+    const allocator = std.testing.allocator;
+
+    var root_obj = std.json.ObjectMap.init(allocator);
+    defer root_obj.deinit();
+    try root_obj.put("type", .{ .string = "string" });
+    const root_schema: std.json.Value = .{ .object = root_obj };
+
+    var registry = SchemaRegistry.init(allocator);
+    defer registry.deinit();
+
+    const bundled = bundle(allocator, root_schema, &registry) orelse return error.BundleFailed;
+    defer freeJsonValue(allocator, bundled);
+
+    // Should be a clone with no $defs added
+    try std.testing.expectEqualStrings("string", bundled.object.get("type").?.string);
+    try std.testing.expect(bundled.object.get("$defs") == null);
+}
+
+test "bundle handles transitive refs" {
+    const allocator = std.testing.allocator;
+
+    // B references C (chain: root -> B -> C)
+    var schema_c_obj = std.json.ObjectMap.init(allocator);
+    defer schema_c_obj.deinit();
+    try schema_c_obj.put("type", .{ .string = "integer" });
+    const schema_c: std.json.Value = .{ .object = schema_c_obj };
+
+    var schema_b_obj = std.json.ObjectMap.init(allocator);
+    defer schema_b_obj.deinit();
+    try schema_b_obj.put("$ref", .{ .string = "https://example.com/c.json" });
+    const schema_b: std.json.Value = .{ .object = schema_b_obj };
+
+    var registry = SchemaRegistry.init(allocator);
+    defer registry.deinit();
+    try registry.addSchema("https://example.com/b.json", schema_b);
+    try registry.addSchema("https://example.com/c.json", schema_c);
+
+    // Root references B
+    var root_obj = std.json.ObjectMap.init(allocator);
+    defer root_obj.deinit();
+    try root_obj.put("$ref", .{ .string = "https://example.com/b.json" });
+    const root_schema: std.json.Value = .{ .object = root_obj };
+
+    const bundled = bundle(allocator, root_schema, &registry) orelse return error.BundleFailed;
+    defer freeJsonValue(allocator, bundled);
+
+    // Verify both B and C are in $defs (transitive resolution)
+    const defs_val = bundled.object.get("$defs") orelse return error.NoDefs;
+    try std.testing.expect(defs_val.object.get("https___example.com_b.json") != null);
+    try std.testing.expect(defs_val.object.get("https___example.com_c.json") != null);
+}
+
 test {
     _ = @import("test_runner.zig");
     _ = Validator;
     _ = compiled_mod;
+    _ = @import("output.zig");
 }
