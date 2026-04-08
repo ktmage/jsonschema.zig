@@ -67,12 +67,34 @@ pub const Annotation = struct {
     value: std.json.Value,
 };
 
+/// JSON Schema draft version.
+pub const Draft = enum {
+    /// Auto-detect from $schema keyword (default).
+    auto,
+    /// JSON Schema Draft 7.
+    draft7,
+    /// JSON Schema Draft 2020-12.
+    draft2020_12,
+};
+
+/// A custom format validator entry.
+pub const CustomFormat = struct {
+    /// Format name (e.g., "employee-id").
+    name: []const u8,
+    /// Validation function. Returns true if the string is valid.
+    validate: *const fn ([]const u8) bool,
+};
+
 /// Options for validation behavior.
 pub const ValidateOptions = struct {
+    /// JSON Schema draft version (default: auto-detect from $schema).
+    draft: Draft = .auto,
     /// Enable format keyword assertion evaluation (default: disabled per spec).
     validate_formats: bool = false,
     /// Custom keyword validators.
     custom_keywords: ?[]const CustomKeyword = null,
+    /// Custom format validators (used when validate_formats is true).
+    custom_formats: ?[]const CustomFormat = null,
     /// Enable annotation collection (default: disabled for performance).
     collect_annotations: bool = false,
 };
@@ -307,7 +329,11 @@ pub fn validateFull(
     // should NOT affect $ref resolution. We track parent_base_uri separately.
     // In Draft 2020-12, $ref is a regular keyword and $id always applies.
     const has_ref = schema.object.get("$ref") != null;
-    const is_2020 = isDraft2020(root_schema);
+    const is_2020 = switch (options.draft) {
+        .auto => isDraft2020(root_schema),
+        .draft7 => false,
+        .draft2020_12 => true,
+    };
     const base_uri = blk: {
         if (schema.object.get("$id")) |id_val| {
             if (asString(id_val)) |id_str| {
@@ -369,6 +395,7 @@ pub fn validateFull(
         .compiled = compiled,
         .validate_formats = options.validate_formats,
         .custom_keywords = options.custom_keywords,
+        .custom_formats = options.custom_formats,
         .collect_annotations = options.collect_annotations,
         .annotations = if (options.collect_annotations) &annotations_list else null,
     };
@@ -387,6 +414,39 @@ fn asString(value: std.json.Value) ?[]const u8 {
         .string => |s| s,
         else => null,
     };
+}
+
+/// Validate a schema against its meta-schema.
+/// Returns true if the schema is structurally valid JSON Schema.
+/// Boolean schemas (true/false) are always valid.
+pub fn isValidSchema(allocator: Allocator, schema: std.json.Value) bool {
+    switch (schema) {
+        .bool => return true,
+        .object => |obj| {
+            // Get the meta-schema URI from $schema, or use draft-07 default
+            const meta_uri = blk: {
+                const sv = obj.get("$schema") orelse break :blk "http://json-schema.org/draft-07/schema";
+                break :blk switch (sv) {
+                    .string => |s| s,
+                    else => "http://json-schema.org/draft-07/schema",
+                };
+            };
+            // Create registry which auto-registers built-in metaschemas
+            var registry = SchemaRegistry.init(allocator);
+            defer registry.deinit();
+            // Look up the metaschema
+            const metaschema = registry.schemas.get(meta_uri) orelse {
+                // Trigger metaschema loading by resolving
+                _ = registry.resolve(schema, "", meta_uri);
+                return registry.schemas.get(meta_uri) != null;
+            };
+            // Validate schema-as-instance against metaschema
+            const result = validateWithRegistry(allocator, metaschema, schema, &registry);
+            defer result.deinit();
+            return result.isValid();
+        },
+        else => return false,
+    }
 }
 
 pub fn isDraft2020(root_schema: std.json.Value) bool {

@@ -72,6 +72,8 @@ pub const Context = struct {
     validate_formats: bool = false,
     /// Custom keyword validators registered by the user.
     custom_keywords: ?[]const CustomKeyword = null,
+    /// Custom format validators.
+    custom_formats: ?[]const jsonschema.CustomFormat = null,
     /// Enable annotation collection (opt-in for performance).
     collect_annotations: bool = false,
     /// Collected annotations (only populated when collect_annotations is true).

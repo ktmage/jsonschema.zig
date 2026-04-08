@@ -19,6 +19,19 @@ pub fn validate(ctx: Context) void {
         else => return, // format only applies to strings
     };
 
+    // Check custom formats first
+    if (ctx.custom_formats) |formats| {
+        for (formats) |cf| {
+            if (std.mem.eql(u8, format_str, cf.name)) {
+                if (!cf.validate(instance_str)) {
+                    const msg = std.fmt.allocPrint(ctx.allocator, "String does not match format '{s}'", .{format_str}) catch return;
+                    defer ctx.allocator.free(msg);
+                    ctx.addError("format", msg);
+                }
+                return;
+            }
+        }
+    }
     const valid = validateFormat(format_str, instance_str);
     if (!valid) {
         const msg = std.fmt.allocPrint(
