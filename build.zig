@@ -72,4 +72,33 @@ pub fn build(b: *std.Build) void {
     const run_lib_test = b.addRunArtifact(lib_test);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_test.step);
+
+    // Regex benchmark (QuickJS libregexp baseline)
+    const regex_bench_mod = b.addModule("regex_bench", .{
+        .root_source_file = b.path("src/regex/bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    regex_bench_mod.addCSourceFiles(.{
+        .files = &.{
+            "src/libregexp/libregexp.c",
+            "src/libregexp/libunicode.c",
+            "src/libregexp/cutils.c",
+            "src/libregexp/lre_shim.c",
+        },
+        .flags = &.{ "-std=c11", "-DCONFIG_VERSION=\"jsonschema.zig\"" },
+    });
+    regex_bench_mod.addIncludePath(b.path("src/libregexp"));
+    // Note: bench.zig uses @cImport directly for libregexp, no module import needed.
+
+    const regex_bench = b.addExecutable(.{
+        .name = "regex-bench",
+        .root_module = regex_bench_mod,
+    });
+    b.installArtifact(regex_bench);
+
+    const run_regex_bench = b.addRunArtifact(regex_bench);
+    const regex_bench_step = b.step("bench-regex", "Run QuickJS libregexp benchmark");
+    regex_bench_step.dependOn(&run_regex_bench.step);
 }
