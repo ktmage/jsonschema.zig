@@ -546,6 +546,8 @@ fn rewriteExternalRefs(val: *std.json.Value, refs: *const std.StringHashMap(std.
                             const safe_key = makeSafeKey(allocator, ref_str) orelse return;
                             defer allocator.free(safe_key);
                             const new_ref = std.fmt.allocPrint(allocator, "#/$defs/{s}", .{safe_key}) catch return;
+                            // Free the old cloned $ref string before replacing
+                            allocator.free(ref_str);
                             ref_ptr.* = .{ .string = new_ref };
                         }
                     }
@@ -660,34 +662,33 @@ fn makeSingleError(
 
 test "bundle embeds external refs into $defs and rewrites URIs" {
     const allocator = std.testing.allocator;
+    // Use an arena for the registry to avoid tracking its internal key allocations
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const reg_alloc = arena.allocator();
 
     // Create a referenced schema: { "type": "string" }
-    var ref_schema_obj = std.json.ObjectMap.init(allocator);
-    defer ref_schema_obj.deinit();
+    var ref_schema_obj = std.json.ObjectMap.init(reg_alloc);
     try ref_schema_obj.put("type", .{ .string = "string" });
     const ref_schema: std.json.Value = .{ .object = ref_schema_obj };
 
     // Register it in a schema registry
-    var registry = SchemaRegistry.init(allocator);
-    defer registry.deinit();
+    var registry = SchemaRegistry.init(reg_alloc);
     try registry.addSchema("https://example.com/name.json", ref_schema);
 
     // Create the root schema:
     // { "properties": { "name": { "$ref": "https://example.com/name.json" } } }
-    var name_prop = std.json.ObjectMap.init(allocator);
-    defer name_prop.deinit();
+    var name_prop = std.json.ObjectMap.init(reg_alloc);
     try name_prop.put("$ref", .{ .string = "https://example.com/name.json" });
 
-    var props = std.json.ObjectMap.init(allocator);
-    defer props.deinit();
+    var props = std.json.ObjectMap.init(reg_alloc);
     try props.put("name", .{ .object = name_prop });
 
-    var root_obj = std.json.ObjectMap.init(allocator);
-    defer root_obj.deinit();
+    var root_obj = std.json.ObjectMap.init(reg_alloc);
     try root_obj.put("properties", .{ .object = props });
     const root_schema: std.json.Value = .{ .object = root_obj };
 
-    // Bundle
+    // Bundle — the output is owned by allocator (testing.allocator)
     const bundled = bundle(allocator, root_schema, &registry) orelse return error.BundleFailed;
     defer freeJsonValue(allocator, bundled);
 
@@ -711,26 +712,25 @@ test "bundle embeds external refs into $defs and rewrites URIs" {
 
 test "bundle handles circular references without infinite loop" {
     const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const reg_alloc = arena.allocator();
 
     // Schema A references B, and B references A
-    var schema_a_obj = std.json.ObjectMap.init(allocator);
-    defer schema_a_obj.deinit();
+    var schema_a_obj = std.json.ObjectMap.init(reg_alloc);
     try schema_a_obj.put("$ref", .{ .string = "https://example.com/b.json" });
     const schema_a: std.json.Value = .{ .object = schema_a_obj };
 
-    var schema_b_obj = std.json.ObjectMap.init(allocator);
-    defer schema_b_obj.deinit();
+    var schema_b_obj = std.json.ObjectMap.init(reg_alloc);
     try schema_b_obj.put("$ref", .{ .string = "https://example.com/a.json" });
     const schema_b: std.json.Value = .{ .object = schema_b_obj };
 
-    var registry = SchemaRegistry.init(allocator);
-    defer registry.deinit();
+    var registry = SchemaRegistry.init(reg_alloc);
     try registry.addSchema("https://example.com/a.json", schema_a);
     try registry.addSchema("https://example.com/b.json", schema_b);
 
     // Root schema that references A
-    var root_obj = std.json.ObjectMap.init(allocator);
-    defer root_obj.deinit();
+    var root_obj = std.json.ObjectMap.init(reg_alloc);
     try root_obj.put("$ref", .{ .string = "https://example.com/a.json" });
     const root_schema: std.json.Value = .{ .object = root_obj };
 
@@ -765,26 +765,25 @@ test "bundle with no external refs returns clone" {
 
 test "bundle handles transitive refs" {
     const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const reg_alloc = arena.allocator();
 
     // B references C (chain: root -> B -> C)
-    var schema_c_obj = std.json.ObjectMap.init(allocator);
-    defer schema_c_obj.deinit();
+    var schema_c_obj = std.json.ObjectMap.init(reg_alloc);
     try schema_c_obj.put("type", .{ .string = "integer" });
     const schema_c: std.json.Value = .{ .object = schema_c_obj };
 
-    var schema_b_obj = std.json.ObjectMap.init(allocator);
-    defer schema_b_obj.deinit();
+    var schema_b_obj = std.json.ObjectMap.init(reg_alloc);
     try schema_b_obj.put("$ref", .{ .string = "https://example.com/c.json" });
     const schema_b: std.json.Value = .{ .object = schema_b_obj };
 
-    var registry = SchemaRegistry.init(allocator);
-    defer registry.deinit();
+    var registry = SchemaRegistry.init(reg_alloc);
     try registry.addSchema("https://example.com/b.json", schema_b);
     try registry.addSchema("https://example.com/c.json", schema_c);
 
     // Root references B
-    var root_obj = std.json.ObjectMap.init(allocator);
-    defer root_obj.deinit();
+    var root_obj = std.json.ObjectMap.init(reg_alloc);
     try root_obj.put("$ref", .{ .string = "https://example.com/b.json" });
     const root_schema: std.json.Value = .{ .object = root_obj };
 
